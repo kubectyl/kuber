@@ -8,10 +8,10 @@ import (
 	"emperror.dev/errors"
 	"github.com/goccy/go-json"
 
-	"github.com/pterodactyl/wings/events"
-	"github.com/pterodactyl/wings/system"
+	"github.com/kubectyl/kuber/events"
+	"github.com/kubectyl/kuber/system"
 
-	"github.com/pterodactyl/wings/server"
+	"github.com/kubectyl/kuber/server"
 )
 
 // RegisterListenerEvents will setup the server event listeners and expiration

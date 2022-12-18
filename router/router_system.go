@@ -3,17 +3,20 @@ package router
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/apex/log"
 	"github.com/gin-gonic/gin"
+	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/rest"
 
-	"github.com/pterodactyl/wings/config"
-	"github.com/pterodactyl/wings/router/middleware"
-	"github.com/pterodactyl/wings/server"
-	"github.com/pterodactyl/wings/server/installer"
-	"github.com/pterodactyl/wings/system"
+	"github.com/kubectyl/kuber/config"
+	"github.com/kubectyl/kuber/router/middleware"
+	"github.com/kubectyl/kuber/server"
+	"github.com/kubectyl/kuber/server/installer"
+	"github.com/kubectyl/kuber/system"
 )
 
 // Returns information about the system that wings is running on.
@@ -29,18 +32,44 @@ func getSystemInformation(c *gin.Context) {
 		return
 	}
 
+	cfg := config.Get().Cluster
+
+	config := &rest.Config{
+		Host:        cfg.Host,
+		BearerToken: cfg.BearerToken,
+		TLSClientConfig: rest.TLSClientConfig{
+			Insecure: cfg.Insecure,
+		},
+	}
+
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
+	if err != nil {
+		fmt.Printf(" error in discoveryClient %v", err)
+	}
+
+	information, err := discoveryClient.ServerVersion()
+	if err != nil {
+		fmt.Println("Error while fetching server version information", err)
+	}
+
 	c.JSON(http.StatusOK, struct {
 		Architecture  string `json:"architecture"`
 		CPUCount      int    `json:"cpu_count"`
 		KernelVersion string `json:"kernel_version"`
 		OS            string `json:"os"`
 		Version       string `json:"version"`
+		Git           string `json:"git_version"`
+		Go            string `json:"go_version"`
+		Platform      string `json:"platform"`
 	}{
 		Architecture:  i.System.Architecture,
 		CPUCount:      i.System.CPUThreads,
 		KernelVersion: i.System.KernelVersion,
 		OS:            i.System.OSType,
 		Version:       i.Version,
+		Git:           information.GitVersion,
+		Go:            information.GoVersion,
+		Platform:      information.Platform,
 	})
 }
 

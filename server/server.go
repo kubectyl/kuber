@@ -13,12 +13,12 @@ import (
 	"github.com/creasty/defaults"
 	"github.com/goccy/go-json"
 
-	"github.com/pterodactyl/wings/config"
-	"github.com/pterodactyl/wings/environment"
-	"github.com/pterodactyl/wings/events"
-	"github.com/pterodactyl/wings/remote"
-	"github.com/pterodactyl/wings/server/filesystem"
-	"github.com/pterodactyl/wings/system"
+	"github.com/kubectyl/kuber/config"
+	"github.com/kubectyl/kuber/environment"
+	"github.com/kubectyl/kuber/events"
+	"github.com/kubectyl/kuber/remote"
+	"github.com/kubectyl/kuber/server/filesystem"
+	"github.com/kubectyl/kuber/system"
 )
 
 // Server is the high level definition for a server instance being controlled
@@ -71,9 +71,6 @@ type Server struct {
 	wsBagLocker sync.Mutex
 
 	sinks map[system.SinkName]*system.SinkPool
-
-	logSink     *system.SinkPool
-	installSink *system.SinkPool
 }
 
 // New returns a new server instance with a context and all of the default
@@ -150,8 +147,8 @@ func (s *Server) GetEnvironmentVariables() []string {
 		fmt.Sprintf("TZ=%s", config.Get().System.Timezone),
 		fmt.Sprintf("STARTUP=%s", s.Config().Invocation),
 		fmt.Sprintf("SERVER_MEMORY=%d", s.MemoryLimit()),
-		fmt.Sprintf("SERVER_IP=%s", s.Config().Allocations.DefaultMapping.Ip),
-		fmt.Sprintf("SERVER_PORT=%d", s.Config().Allocations.DefaultMapping.Port),
+		// fmt.Sprintf("SERVER_IP=%s", s.Config().Allocations.DefaultMapping.Ip),
+		fmt.Sprintf("SERVER_PORT=%d", s.Config().Allocations.DefaultPort),
 	}
 
 eloop:
@@ -247,7 +244,8 @@ func (s *Server) CreateEnvironment() error {
 		return err
 	}
 
-	return s.Environment.Create()
+	// return s.Environment.Create()
+	return nil
 }
 
 // Checks if the server is marked as being suspended or not on the system.

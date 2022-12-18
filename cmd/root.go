@@ -19,23 +19,23 @@ import (
 	"github.com/NYTimes/logrotate"
 	"github.com/apex/log"
 	"github.com/apex/log/handlers/multi"
-	"github.com/docker/docker/client"
 	"github.com/gammazero/workerpool"
 	"github.com/mitchellh/colorstring"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 
-	"github.com/pterodactyl/wings/config"
-	"github.com/pterodactyl/wings/environment"
-	"github.com/pterodactyl/wings/internal/cron"
-	"github.com/pterodactyl/wings/internal/database"
-	"github.com/pterodactyl/wings/loggers/cli"
-	"github.com/pterodactyl/wings/remote"
-	"github.com/pterodactyl/wings/router"
-	"github.com/pterodactyl/wings/server"
-	"github.com/pterodactyl/wings/sftp"
-	"github.com/pterodactyl/wings/system"
+	"github.com/kubectyl/kuber/config"
+	"github.com/kubectyl/kuber/environment"
+	"github.com/kubectyl/kuber/internal/cron"
+	"github.com/kubectyl/kuber/internal/database"
+	"github.com/kubectyl/kuber/loggers/cli"
+	"github.com/kubectyl/kuber/remote"
+	"github.com/kubectyl/kuber/router"
+	"github.com/kubectyl/kuber/server"
+	"github.com/kubectyl/kuber/system"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 var (
@@ -44,14 +44,14 @@ var (
 )
 
 var rootCommand = &cobra.Command{
-	Use:   "wings",
+	Use:   "kuber",
 	Short: "Runs the API server allowing programmatic control of game servers for Pterodactyl Panel.",
 	PreRun: func(cmd *cobra.Command, args []string) {
 		initConfig()
 		initLogging()
 		if tls, _ := cmd.Flags().GetBool("auto-tls"); tls {
 			if host, _ := cmd.Flags().GetString("tls-hostname"); host == "" {
-				fmt.Println("A TLS hostname must be provided when running wings with automatic TLS, e.g.:\n\n    ./wings --auto-tls --tls-hostname my.example.com")
+				fmt.Println("A TLS hostname must be provided when running kuber with automatic TLS, e.g.:\n\n    ./wings --auto-tls --tls-hostname my.example.com")
 				os.Exit(1)
 			}
 		}
@@ -91,7 +91,6 @@ func init() {
 }
 
 func rootCmdRun(cmd *cobra.Command, _ []string) {
-	printLogo()
 	log.Debug("running in debug mode")
 	log.WithField("config_file", configPath).Info("loading configuration from file")
 
@@ -138,10 +137,6 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 	manager, err := server.NewManager(cmd.Context(), pclient)
 	if err != nil {
 		log.WithField("error", err).Fatal("failed to load server configurations")
-	}
-
-	if err := environment.ConfigureDocker(cmd.Context()); err != nil {
-		log.WithField("error", err).Fatal("failed to configure docker environment")
 	}
 
 	if err := config.WriteToDisk(config.Get()); err != nil {
@@ -211,7 +206,7 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 			// point. If we didn't do this, and you pruned all the images and then started wings you could
 			// end up waiting a long period of time for all the images to be re-pulled on Wings boot rather
 			// than when the server itself is started.
-			if err != nil && !client.IsErrNotFound(err) {
+			if err != nil && !apierrors.IsNotFound(err) {
 				s.Log().WithField("error", err).Error("error checking server environment status")
 			}
 
@@ -270,14 +265,6 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 		log.WithField("subsystem", "cron").Info("starting cron processes")
 		s.StartAsync()
 	}
-
-	go func() {
-		// Run the SFTP server.
-		if err := sftp.New(manager).Run(); err != nil {
-			log.WithError(err).Fatal("failed to initialize the sftp server")
-			return
-		}
-	}()
 
 	go func() {
 		log.Info("updating server states on Panel: marking installing/restoring servers as normal")
@@ -418,27 +405,6 @@ func initLogging() {
 	log.WithField("path", p).Info("writing log files to disk")
 }
 
-// Prints the wings logo, nothing special here!
-func printLogo() {
-	fmt.Printf(colorstring.Color(`
-                     ____
-__ [blue][bold]Pterodactyl[reset] _____/___/_______ _______ ______
-\_____\    \/\/    /   /       /  __   /   ___/
-   \___\          /   /   /   /  /_/  /___   /
-        \___/\___/___/___/___/___    /______/
-                            /_______/ [bold]%s[reset]
-
-Copyright © 2018 - %d Dane Everitt & Contributors
-
-Website:  https://pterodactyl.io
- Source:  https://github.com/pterodactyl/wings
-License:  https://github.com/pterodactyl/wings/blob/develop/LICENSE
-
-This software is made available under the terms of the MIT license.
-The above copyright notice and this permission notice shall be included
-in all copies or substantial portions of the Software.%s`), system.Version, time.Now().Year(), "\n\n")
-}
-
 func exitWithConfigurationNotice() {
 	fmt.Print(colorstring.Color(`
 [_red_][white][bold]Error: Configuration File Not Found[reset]
@@ -447,7 +413,7 @@ Wings was not able to locate your configuration file, and therefore is not
 able to complete its boot process. Please ensure you have copied your instance
 configuration file into the default location below.
 
-Default Location: /etc/pterodactyl/config.yml
+Default Location: /etc/kubectyl/config.yml
 
 [yellow]This is not a bug with this software. Please do not make a bug report
 for this issue, it will be closed.[reset]

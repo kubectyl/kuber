@@ -1,8 +1,8 @@
 package server
 
 import (
-	"github.com/pterodactyl/wings/events"
-	"github.com/pterodactyl/wings/system"
+	"github.com/kubectyl/kuber/events"
+	"github.com/kubectyl/kuber/system"
 )
 
 // Defines all the possible output events for a server.
@@ -14,6 +14,7 @@ const (
 	ConsoleOutputEvent          = "console output"
 	StatusEvent                 = "status"
 	StatsEvent                  = "stats"
+	JsonEvent                   = "json"
 	BackupRestoreCompletedEvent = "backup restore completed"
 	BackupCompletedEvent        = "backup completed"
 	TransferLogsEvent           = "transfer logs"

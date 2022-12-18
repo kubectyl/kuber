@@ -6,8 +6,8 @@ import (
 	"emperror.dev/errors"
 	"github.com/asaskevich/govalidator"
 
-	"github.com/pterodactyl/wings/remote"
-	"github.com/pterodactyl/wings/server"
+	"github.com/kubectyl/kuber/remote"
+	"github.com/kubectyl/kuber/server"
 )
 
 type Installer struct {

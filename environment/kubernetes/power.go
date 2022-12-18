@@ -1,7 +1,8 @@
-package docker
+package kubernetes
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"syscall"
@@ -9,12 +10,14 @@ import (
 
 	"emperror.dev/errors"
 	"github.com/apex/log"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
+	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 
-	"github.com/pterodactyl/wings/environment"
-	"github.com/pterodactyl/wings/remote"
+	"github.com/kubectyl/kuber/config"
+	"github.com/kubectyl/kuber/environment"
+	"github.com/kubectyl/kuber/remote"
 )
 
 // OnBeforeStart run before the container starts and get the process
@@ -27,10 +30,29 @@ import (
 // is running does not result in the server becoming un-bootable.
 func (e *Environment) OnBeforeStart(ctx context.Context) error {
 	// Always destroy and re-create the server container to ensure that synced data from the Panel is used.
-	if err := e.client.ContainerRemove(ctx, e.Id, types.ContainerRemoveOptions{RemoveVolumes: true}); err != nil {
-		if !client.IsErrNotFound(err) {
-			return errors.WrapIf(err, "environment/docker: failed to remove container during pre-boot")
+	var zero int64 = 0
+	policy := metav1.DeletePropagationForeground
+
+	if err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ctx, e.Id, metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &policy}); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return errors.WrapIf(err, "environment/kubernetes: failed to remove pod during pre-boot")
 		}
+	}
+
+	conditionFunc := func() (bool, error) {
+		_, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.TODO(), e.Id, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return true, nil
+			}
+			return true, err
+		}
+		return false, nil
+	}
+
+	err := wait.Poll(time.Second, time.Second*10, conditionFunc)
+	if err != nil {
+		return err
 	}
 
 	// The Create() function will check if the container exists in the first place, and if
@@ -66,19 +88,48 @@ func (e *Environment) Start(ctx context.Context) error {
 		}
 	}()
 
-	if c, err := e.ContainerInspect(ctx); err != nil {
+	if c, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(ctx, e.Id, metav1.GetOptions{}); err != nil {
 		// Do nothing if the container is not found, we just don't want to continue
 		// to the next block of code here. This check was inlined here to guard against
 		// a nil-pointer when checking c.State below.
 		//
 		// @see https://github.com/pterodactyl/panel/issues/2000
-		if !client.IsErrNotFound(err) {
+		if !apierrors.IsNotFound(err) {
 			return errors.WrapIf(err, "environment/docker: failed to inspect container")
 		}
 	} else {
 		// If the server is running update our internal state and continue on with the attach.
-		if c.State.Running {
+		if c.Status.Phase == v1.PodRunning {
 			e.SetState(environment.ProcessRunningState)
+
+			go func() {
+				conditionFunc := func() (bool, error) {
+					pod, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.TODO(), e.Id, metav1.GetOptions{})
+					if err != nil {
+						return true, err
+					}
+
+					switch pod.Status.Phase {
+					case v1.PodFailed, v1.PodSucceeded:
+						return true, fmt.Errorf("pod ran to completion")
+					}
+					return false, nil
+				}
+
+				err := wait.PollInfinite(time.Second, conditionFunc)
+				if err != nil {
+					e.SetState(environment.ProcessOfflineState)
+				}
+			}()
+
+			if e.Config().Limits().DiskSpace <= 0 {
+				e.HasSpaceAvailable(true)
+			} else {
+				// s.PublishConsoleOutputFromDaemon("Checking server disk space usage, this could take a few seconds...")
+				if err := e.HasSpaceErr(false); err != nil {
+					return err
+				}
+			}
 
 			return e.Attach(ctx)
 		}
@@ -86,11 +137,12 @@ func (e *Environment) Start(ctx context.Context) error {
 		// Truncate the log file, so we don't end up outputting a bunch of useless log information
 		// to the websocket and whatnot. Check first that the path and file exist before trying
 		// to truncate them.
-		if _, err := os.Stat(c.LogPath); err == nil {
-			if err := os.Truncate(c.LogPath, 0); err != nil {
-				return errors.Wrap(err, "environment/docker: failed to truncate instance logs")
-			}
-		}
+
+		// if _, err := os.Stat(c.LogPath); err == nil {
+		// 	if err := os.Truncate(c.LogPath, 0); err != nil {
+		// 		return errors.Wrap(err, "environment/docker: failed to truncate instance logs")
+		// 	}
+		// }
 	}
 
 	e.SetState(environment.ProcessStartingState)
@@ -111,6 +163,36 @@ func (e *Environment) Start(ctx context.Context) error {
 	actx, cancel := context.WithTimeout(ctx, time.Second*30)
 	defer cancel()
 
+	conditionFunc := func() (bool, error) {
+		pod, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.TODO(), e.Id, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+
+		switch pod.Status.Phase {
+		case v1.PodRunning:
+			return true, nil
+		case v1.PodFailed, v1.PodSucceeded:
+			return false, fmt.Errorf("pod ran to completion")
+		}
+		return false, nil
+	}
+
+	err := wait.Poll(time.Second, time.Second*30, conditionFunc)
+	if err != nil {
+		e.SetState(environment.ProcessOfflineState)
+		return nil
+	}
+
+	if e.Config().Limits().DiskSpace <= 0 {
+		e.HasSpaceAvailable(true)
+	} else {
+		// s.PublishConsoleOutputFromDaemon("Checking server disk space usage, this could take a few seconds...")
+		if err := e.HasSpaceErr(false); err != nil {
+			return err
+		}
+	}
+
 	// You must attach to the instance _before_ you start the container. If you do this
 	// in the opposite order you'll enter a deadlock condition where we're attached to
 	// the instance successfully, but the container has already stopped and you'll get
@@ -120,10 +202,6 @@ func (e *Environment) Start(ctx context.Context) error {
 	// react to errors/output stopping/etc. when starting.
 	if err := e.Attach(actx); err != nil {
 		return err
-	}
-
-	if err := e.client.ContainerStart(actx, e.Id, types.ContainerStartOptions{}); err != nil {
-		return errors.WrapIf(err, "environment/docker: failed to start container")
 	}
 
 	// No errors, good to continue through.
@@ -183,11 +261,10 @@ func (e *Environment) Stop(ctx context.Context) error {
 	// Using a negative timeout here will allow the container to stop gracefully,
 	// rather than forcefully terminating it, this value MUST be at least 1
 	// second, otherwise it will be ignored.
-	timeout := -1 * time.Second
-	if err := e.client.ContainerStop(ctx, e.Id, &timeout); err != nil {
+	if err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ctx, e.Id, metav1.DeleteOptions{}); err != nil {
 		// If the container does not exist just mark the process as stopped and return without
 		// an error.
-		if client.IsErrNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			e.SetStream(nil)
 			e.SetState(environment.ProcessOfflineState)
 			return nil
@@ -240,29 +317,23 @@ func (e *Environment) WaitForStop(ctx context.Context, duration time.Duration, t
 	// Block the return of this function until the container as been marked as no
 	// longer running. If this wait does not end by the time seconds have passed,
 	// attempt to terminate the container, or return an error.
-	ok, errChan := e.client.ContainerWait(tctx, e.Id, container.WaitConditionNotRunning)
-	select {
-	case <-ctx.Done():
-		if err := ctx.Err(); err != nil {
-			if terminate {
-				return doTermination("parent-context")
+	conditionFunc := func(context.Context) (bool, error) {
+		_, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(tctx, e.Id, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return true, nil
 			}
-			return err
+			return false, nil
 		}
-	case err := <-errChan:
-		// If the error stems from the container not existing there is no point in wasting
-		// CPU time to then try and terminate it.
-		if err == nil || client.IsErrNotFound(err) {
-			return nil
+		return false, nil
+	}
+
+	err := wait.PollUntilWithContext(tctx, time.Second, conditionFunc)
+	if terminate && err != nil {
+		if !errors.Is(err, context.DeadlineExceeded) {
+			e.log().WithField("error", err).Warn("error while waiting for pod stop; terminating process")
 		}
-		if terminate {
-			if !errors.Is(err, context.DeadlineExceeded) {
-				e.log().WithField("error", err).Warn("error while waiting for container stop; terminating process")
-			}
-			return doTermination("wait")
-		}
-		return errors.WrapIf(err, "environment/docker: error waiting on container to enter \"not-running\" state")
-	case <-ok:
+		return doTermination("wait")
 	}
 
 	return nil
@@ -270,32 +341,21 @@ func (e *Environment) WaitForStop(ctx context.Context, duration time.Duration, t
 
 // Terminate forcefully terminates the container using the signal provided.
 func (e *Environment) Terminate(ctx context.Context, signal os.Signal) error {
-	c, err := e.ContainerInspect(ctx)
+	_, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(ctx, e.Id, metav1.GetOptions{})
 	if err != nil {
 		// Treat missing containers as an okay error state, means it is obviously
 		// already terminated at this point.
-		if client.IsErrNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return nil
 		}
 		return errors.WithStack(err)
 	}
 
-	if !c.State.Running {
-		// If the container is not running, but we're not already in a stopped state go ahead
-		// and update things to indicate we should be completely stopped now. Set to stopping
-		// first so crash detection is not triggered.
-		if e.st.Load() != environment.ProcessOfflineState {
-			e.SetState(environment.ProcessStoppingState)
-			e.SetState(environment.ProcessOfflineState)
-		}
-
-		return nil
-	}
-
 	// We set it to stopping than offline to prevent crash detection from being triggered.
 	e.SetState(environment.ProcessStoppingState)
-	sig := strings.TrimSuffix(strings.TrimPrefix(signal.String(), "signal "), "ed")
-	if err := e.client.ContainerKill(ctx, e.Id, sig); err != nil && !client.IsErrNotFound(err) {
+	var zero int64 = 0
+	policy := metav1.DeletePropagationForeground
+	if err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ctx, e.Id, metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &policy}); err != nil && !apierrors.IsNotFound(err) {
 		return errors.WithStack(err)
 	}
 	e.SetState(environment.ProcessOfflineState)

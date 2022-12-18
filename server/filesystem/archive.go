@@ -17,8 +17,8 @@ import (
 	"github.com/klauspost/pgzip"
 	ignore "github.com/sabhiram/go-gitignore"
 
-	"github.com/pterodactyl/wings/config"
-	"github.com/pterodactyl/wings/internal/progress"
+	"github.com/kubectyl/kuber/config"
+	"github.com/kubectyl/kuber/internal/progress"
 )
 
 const memory = 4 * 1024

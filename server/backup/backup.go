@@ -14,8 +14,8 @@ import (
 	"github.com/mholt/archiver/v4"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/pterodactyl/wings/config"
-	"github.com/pterodactyl/wings/remote"
+	"github.com/kubectyl/kuber/config"
+	"github.com/kubectyl/kuber/remote"
 )
 
 var format = archiver.CompressedArchive{

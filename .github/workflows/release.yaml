@@ -24,10 +24,10 @@ jobs:
           CGO_ENABLED: 0
           REF: ${{ github.ref }}
         run: |
-          GOARCH=amd64 go build -o dist/wings_linux_amd64 -v -trimpath -ldflags="-s -w -X github.com/pterodactyl/wings/system.Version=${REF:11}" github.com/pterodactyl/wings
-          chmod 755 dist/wings_linux_amd64
-          GOARCH=arm64 go build -o dist/wings_linux_arm64 -v -trimpath -ldflags="-s -w -X github.com/pterodactyl/wings/system.Version=${REF:11}" github.com/pterodactyl/wings
-          chmod 755 dist/wings_linux_arm64
+          GOARCH=amd64 go build -o dist/kuber_linux_amd64 -v -trimpath -ldflags="-s -w -X github.com/kubectyl/kuber/system.Version=${REF:11}" github.com/kubectyl/kuber
+          chmod 755 dist/kuber_linux_amd64
+          GOARCH=arm64 go build -o dist/kuber_linux_arm64 -v -trimpath -ldflags="-s -w -X github.com/kubectyl/kuber/system.Version=${REF:11}" github.com/kubectyl/kuber
+          chmod 755 dist/kuber_linux_arm64
 
       - name: Extract changelog
         env:
@@ -37,8 +37,8 @@ jobs:
 
       - name: Create checksum and add to changelog
         run: |
-          SUM=`cd dist && sha256sum wings_linux_amd64`
-          SUM2=`cd dist && sha256sum wings_linux_arm64`
+          SUM=`cd dist && sha256sum kuber_linux_amd64`
+          SUM2=`cd dist && sha256sum kuber_linux_arm64`
           echo -e "\n#### SHA256 Checksum\n\`\`\`\n$SUM\n$SUM2\n\`\`\`\n" >> ./RELEASE_CHANGELOG
           echo -e "$SUM\n$SUM2" > checksums.txt
 
@@ -47,8 +47,8 @@ jobs:
           REF: ${{ github.ref }}
         run: |
           BRANCH=release/${REF:10}
-          git config --local user.email "ci@pterodactyl.io"
-          git config --local user.name "Pterodactyl CI"
+          git config --local user.email "ci@kubectyl.org"
+          git config --local user.name "Kubectyl CI"
           git checkout -b $BRANCH
           git push -u origin $BRANCH
           sed -i "s/var Version = \".*\"/var Version = \"${REF:11}\"/" system/const.go
@@ -72,8 +72,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: dist/wings_linux_amd64
-          asset_name: wings_linux_amd64
+          asset_path: dist/kuber_linux_amd64
+          asset_name: kuber_linux_amd64
           asset_content_type: application/octet-stream
 
       - name: Upload arm64 binary
@@ -82,8 +82,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: dist/wings_linux_arm64
-          asset_name: wings_linux_arm64
+          asset_path: dist/kuber_linux_arm64
+          asset_name: kuber_linux_arm64
           asset_content_type: application/octet-stream
 
       - name: Upload checksum

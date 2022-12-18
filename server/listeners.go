@@ -9,11 +9,11 @@ import (
 
 	"github.com/apex/log"
 
-	"github.com/pterodactyl/wings/events"
-	"github.com/pterodactyl/wings/system"
+	"github.com/kubectyl/kuber/events"
+	"github.com/kubectyl/kuber/system"
 
-	"github.com/pterodactyl/wings/environment"
-	"github.com/pterodactyl/wings/remote"
+	"github.com/kubectyl/kuber/environment"
+	"github.com/kubectyl/kuber/remote"
 )
 
 var dockerEvents = []string{

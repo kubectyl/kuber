@@ -6,10 +6,10 @@ import (
 
 	"emperror.dev/errors"
 
-	"github.com/pterodactyl/wings/internal/database"
-	"github.com/pterodactyl/wings/internal/models"
-	"github.com/pterodactyl/wings/server"
-	"github.com/pterodactyl/wings/system"
+	"github.com/kubectyl/kuber/internal/database"
+	"github.com/kubectyl/kuber/internal/models"
+	"github.com/kubectyl/kuber/server"
+	"github.com/kubectyl/kuber/system"
 )
 
 type sftpCron struct {

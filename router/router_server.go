@@ -10,11 +10,11 @@ import (
 	"github.com/apex/log"
 	"github.com/gin-gonic/gin"
 
-	"github.com/pterodactyl/wings/router/downloader"
-	"github.com/pterodactyl/wings/router/middleware"
-	"github.com/pterodactyl/wings/router/tokens"
-	"github.com/pterodactyl/wings/server"
-	"github.com/pterodactyl/wings/server/transfer"
+	"github.com/kubectyl/kuber/router/downloader"
+	"github.com/kubectyl/kuber/router/middleware"
+	"github.com/kubectyl/kuber/router/tokens"
+	"github.com/kubectyl/kuber/server"
+	"github.com/kubectyl/kuber/server/transfer"
 )
 
 // Returns a single server from the collection of servers.

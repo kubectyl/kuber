@@ -4,8 +4,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/pterodactyl/wings/environment"
-	"github.com/pterodactyl/wings/system"
+	"github.com/kubectyl/kuber/environment"
+	"github.com/kubectyl/kuber/system"
 )
 
 // ResourceUsage defines the current resource usage for a given server instance. If a server is offline you
@@ -33,7 +33,7 @@ func (s *Server) Proc() ResourceUsage {
 	s.resources.mu.Lock()
 	defer s.resources.mu.Unlock()
 	// Store the updated disk usage when requesting process usage.
-	atomic.StoreInt64(&s.resources.Disk, s.Filesystem().CachedUsage())
+	atomic.StoreInt64(&s.resources.Disk, s.Environment.CachedUsage())
 	//goland:noinspection GoVetCopyLock
 	return s.resources
 }

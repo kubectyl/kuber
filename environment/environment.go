@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/pterodactyl/wings/events"
+	"github.com/kubectyl/kuber/events"
 )
 
 const (
@@ -94,6 +94,17 @@ type ProcessEnvironment interface {
 
 	// Sends the provided command to the running server instance.
 	SendCommand(string) error
+
+	CachedUsage() int64
+
+	DiskUsage(bool) (int64, error)
+
+	HasSpaceAvailable(bool) bool
+
+	HasSpaceErr(bool) error
+
+	// Return pod and service json
+	ReturnJSON() ([]byte, error)
 
 	// Reads the log file for the process from the end backwards until the provided
 	// number of lines is met.

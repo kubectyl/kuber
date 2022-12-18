@@ -17,7 +17,7 @@ import (
 	"gopkg.in/ini.v1"
 	"gopkg.in/yaml.v3"
 
-	"github.com/pterodactyl/wings/config"
+	"github.com/kubectyl/kuber/config"
 )
 
 // The file parsing options that are available for a server configuration file.

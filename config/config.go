@@ -22,10 +22,10 @@ import (
 	"github.com/gbrlsnchs/jwt/v3"
 	"gopkg.in/yaml.v2"
 
-	"github.com/pterodactyl/wings/system"
+	"github.com/kubectyl/kuber/system"
 )
 
-const DefaultLocation = "/etc/pterodactyl/config.yml"
+const DefaultLocation = "/etc/kubectyl/config.yml"
 
 // DefaultTLSConfig sets sane defaults to use when configuring the internal
 // webserver to listen for public connections.
@@ -57,16 +57,6 @@ var (
 // Locker specific to writing the configuration to the disk, this happens
 // in areas that might already be locked, so we don't want to crash the process.
 var _writeLock sync.Mutex
-
-// SftpConfiguration defines the configuration of the internal SFTP server.
-type SftpConfiguration struct {
-	// The bind address of the SFTP server.
-	Address string `default:"0.0.0.0" json:"bind_address" yaml:"bind_address"`
-	// The bind port of the SFTP server.
-	Port int `default:"2022" json:"bind_port" yaml:"bind_port"`
-	// If set to true, no write actions will be allowed on the SFTP server.
-	ReadOnly bool `default:"false" yaml:"read_only"`
-}
 
 // ApiConfiguration defines the configuration for the internal API that is
 // exposed by the Wings webserver.
@@ -202,8 +192,6 @@ type SystemConfiguration struct {
 	// The number of lines to send when a server connects to the websocket.
 	WebsocketLogCount int `default:"150" yaml:"websocket_log_count"`
 
-	Sftp SftpConfiguration `yaml:"sftp"`
-
 	CrashDetection CrashDetection `yaml:"crash_detection"`
 
 	Backups Backups `yaml:"backups"`
@@ -292,9 +280,9 @@ type Configuration struct {
 	// validate against it.
 	AuthenticationToken string `json:"token" yaml:"token"`
 
-	Api    ApiConfiguration    `json:"api" yaml:"api"`
-	System SystemConfiguration `json:"system" yaml:"system"`
-	Docker DockerConfiguration `json:"docker" yaml:"docker"`
+	Api     ApiConfiguration     `json:"api" yaml:"api"`
+	System  SystemConfiguration  `json:"system" yaml:"system"`
+	Cluster ClusterConfiguration `json:"cluster" yaml:"cluster"`
 
 	// Defines internal throttling configurations for server processes to prevent
 	// someone from running an endless loop that spams data to logs.
@@ -433,9 +421,9 @@ func EnsurePterodactylUser() error {
 
 	// Our way of detecting if wings is running inside of Docker.
 	if sysName == "distroless" {
-		_config.System.Username = system.FirstNotEmpty(os.Getenv("WINGS_USERNAME"), "pterodactyl")
-		_config.System.User.Uid = system.MustInt(system.FirstNotEmpty(os.Getenv("WINGS_UID"), "988"))
-		_config.System.User.Gid = system.MustInt(system.FirstNotEmpty(os.Getenv("WINGS_GID"), "988"))
+		_config.System.Username = system.FirstNotEmpty(os.Getenv("KUBER_USERNAME"), "kubectyl")
+		_config.System.User.Uid = system.MustInt(system.FirstNotEmpty(os.Getenv("KUBER_UID"), "988"))
+		_config.System.User.Gid = system.MustInt(system.FirstNotEmpty(os.Getenv("KUBER_GID"), "988"))
 		return nil
 	}
 

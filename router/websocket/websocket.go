@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pterodactyl/wings/internal/models"
+	"github.com/kubectyl/kuber/internal/models"
 
 	"emperror.dev/errors"
 	"github.com/apex/log"
@@ -18,13 +18,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
-	"github.com/pterodactyl/wings/system"
+	"github.com/kubectyl/kuber/system"
 
-	"github.com/pterodactyl/wings/config"
-	"github.com/pterodactyl/wings/environment"
-	"github.com/pterodactyl/wings/environment/docker"
-	"github.com/pterodactyl/wings/router/tokens"
-	"github.com/pterodactyl/wings/server"
+	"github.com/kubectyl/kuber/config"
+	"github.com/kubectyl/kuber/environment"
+	docker "github.com/kubectyl/kuber/environment/kubernetes"
+	"github.com/kubectyl/kuber/router/tokens"
+	"github.com/kubectyl/kuber/server"
 )
 
 const (
@@ -405,6 +405,16 @@ func (h *Handler) HandleInbound(ctx context.Context, m Message) error {
 			b, _ := json.Marshal(h.server.Proc())
 			_ = h.SendJson(Message{
 				Event: server.StatsEvent,
+				Args:  []string{string(b)},
+			})
+
+			return nil
+		}
+	case SendJsonEvent:
+		{
+			b, _ := h.server.Environment.ReturnJSON()
+			_ = h.SendJson(Message{
+				Event: server.JsonEvent,
 				Args:  []string{string(b)},
 			})
 

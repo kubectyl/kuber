@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pterodactyl/wings/config"
-	"github.com/pterodactyl/wings/environment"
+	"github.com/kubectyl/kuber/config"
+	"github.com/kubectyl/kuber/environment"
 )
 
 type CrashHandler struct {

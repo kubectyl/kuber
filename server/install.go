@@ -4,26 +4,27 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"fmt"
 	"html/template"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"emperror.dev/errors"
 	"github.com/apex/log"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/client"
+	"k8s.io/client-go/kubernetes"
 
-	"github.com/pterodactyl/wings/config"
-	"github.com/pterodactyl/wings/environment"
-	"github.com/pterodactyl/wings/remote"
-	"github.com/pterodactyl/wings/system"
+	"github.com/kubectyl/kuber/config"
+	"github.com/kubectyl/kuber/environment"
+	"github.com/kubectyl/kuber/remote"
+	"github.com/kubectyl/kuber/system"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 // Install executes the installation stack for a server process. Bubbles any
@@ -118,7 +119,7 @@ func (s *Server) internalInstall() error {
 type InstallationProcess struct {
 	Server *Server
 	Script *remote.InstallationScript
-	client *client.Client
+	client *kubernetes.Clientset
 }
 
 // NewInstallationProcess returns a new installation process struct that will be
@@ -130,7 +131,7 @@ func NewInstallationProcess(s *Server, script *remote.InstallationScript) (*Inst
 		Server: s,
 	}
 
-	if c, err := environment.Docker(); err != nil {
+	if _, c, err := environment.Cluster(); err != nil {
 		return nil, err
 	} else {
 		proc.client = c
@@ -163,11 +164,12 @@ func (s *Server) SetRestoring(state bool) {
 
 // RemoveContainer removes the installation container for the server.
 func (ip *InstallationProcess) RemoveContainer() error {
-	err := ip.client.ContainerRemove(ip.Server.Context(), ip.Server.ID()+"_installer", types.ContainerRemoveOptions{
-		RemoveVolumes: true,
-		Force:         true,
-	})
-	if err != nil && !client.IsErrNotFound(err) {
+	err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ip.Server.Context(), ip.Server.ID()+"-installer", metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	err = ip.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).Delete(ip.Server.Context(), ip.Server.ID()+"-configmap", metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 	return nil
@@ -246,77 +248,6 @@ func (ip *InstallationProcess) writeScriptToDisk() error {
 	return nil
 }
 
-// Pulls the docker image to be used for the installation container.
-func (ip *InstallationProcess) pullInstallationImage() error {
-	// Get a registry auth configuration from the config.
-	var registryAuth *config.RegistryConfiguration
-	for registry, c := range config.Get().Docker.Registries {
-		if !strings.HasPrefix(ip.Script.ContainerImage, registry) {
-			continue
-		}
-
-		log.WithField("registry", registry).Debug("using authentication for registry")
-		registryAuth = &c
-		break
-	}
-
-	// Get the ImagePullOptions.
-	imagePullOptions := types.ImagePullOptions{All: false}
-	if registryAuth != nil {
-		b64, err := registryAuth.Base64()
-		if err != nil {
-			log.WithError(err).Error("failed to get registry auth credentials")
-		}
-
-		// b64 is a string so if there is an error it will just be empty, not nil.
-		imagePullOptions.RegistryAuth = b64
-	}
-
-	r, err := ip.client.ImagePull(ip.Server.Context(), ip.Script.ContainerImage, imagePullOptions)
-	if err != nil {
-		images, ierr := ip.client.ImageList(ip.Server.Context(), types.ImageListOptions{})
-		if ierr != nil {
-			// Well damn, something has gone really wrong here, just go ahead and abort there
-			// isn't much anything we can do to try and self-recover from this.
-			return ierr
-		}
-
-		for _, img := range images {
-			for _, t := range img.RepoTags {
-				if t != ip.Script.ContainerImage {
-					continue
-				}
-
-				log.WithFields(log.Fields{
-					"image": ip.Script.ContainerImage,
-					"err":   err.Error(),
-				}).Warn("unable to pull requested image from remote source, however the image exists locally")
-
-				// Okay, we found a matching container image, in that case just go ahead and return
-				// from this function, since there is nothing else we need to do here.
-				return nil
-			}
-		}
-
-		return err
-	}
-	defer r.Close()
-
-	log.WithField("image", ip.Script.ContainerImage).Debug("pulling docker image... this could take a bit of time")
-
-	// Block continuation until the image has been pulled successfully.
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		log.Debug(scanner.Text())
-	}
-
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-
-	return nil
-}
-
 // BeforeExecute runs before the container is executed. This pulls down the
 // required docker container image as well as writes the installation script to
 // the disk. This process is executed in an async manner, if either one fails
@@ -325,8 +256,12 @@ func (ip *InstallationProcess) BeforeExecute() error {
 	if err := ip.writeScriptToDisk(); err != nil {
 		return errors.WithMessage(err, "failed to write installation script to disk")
 	}
-	if err := ip.pullInstallationImage(); err != nil {
-		return errors.WithMessage(err, "failed to pull updated installation container image for server")
+	var zero int64 = 0
+	policy := metav1.DeletePropagationForeground
+	if err := ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Delete(context.Background(), ip.Server.ID()+"-pvc", metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &policy}); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return errors.WithMessage(err, "failed to remove pvc before running installation")
+		}
 	}
 	if err := ip.RemoveContainer(); err != nil {
 		return errors.WithMessage(err, "failed to remove existing install container for server")
@@ -346,13 +281,16 @@ func (ip *InstallationProcess) AfterExecute(containerId string) error {
 	defer ip.RemoveContainer()
 
 	ip.Server.Log().WithField("container_id", containerId).Debug("pulling installation logs for server")
-	reader, err := ip.client.ContainerLogs(ip.Server.Context(), containerId, types.ContainerLogsOptions{
-		ShowStdout: true,
-		ShowStderr: true,
-		Follow:     false,
+	reader := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).GetLogs(ip.Server.ID()+"-installer", &corev1.PodLogOptions{
+		Follow: false,
 	})
+	podLogs, err := reader.Stream(ip.Server.Context())
+	if err != nil {
+		return err
+	}
+	defer podLogs.Close()
 
-	if err != nil && !client.IsErrNotFound(err) {
+	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 
@@ -394,7 +332,7 @@ func (ip *InstallationProcess) AfterExecute(containerId string) error {
 		return err
 	}
 
-	if _, err := io.Copy(f, reader); err != nil {
+	if _, err := io.Copy(f, podLogs); err != nil {
 		return err
 	}
 
@@ -410,52 +348,124 @@ func (ip *InstallationProcess) Execute() (string, error) {
 	ctx, cancel := context.WithCancel(ip.Server.Context())
 	defer cancel()
 
-	conf := &container.Config{
-		Hostname:     "installer",
-		AttachStdout: true,
-		AttachStderr: true,
-		AttachStdin:  true,
-		OpenStdin:    true,
-		Tty:          true,
-		Cmd:          []string{ip.Script.Entrypoint, "/mnt/install/install.sh"},
-		Image:        ip.Script.ContainerImage,
-		Env:          ip.Server.GetEnvironmentVariables(),
-		Labels: map[string]string{
-			"Service":       "Pterodactyl",
-			"ContainerType": "server_installer",
+	fileContents, err := os.ReadFile(filepath.Join(ip.tempDir(), "install.sh"))
+	if err != nil {
+		return "", err
+	}
+
+	configmap := &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ConfigMap",
+			APIVersion: "v1",
 		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: ip.Server.ID() + "-configmap",
+		},
+		Data: map[string]string{
+			"install.sh": string(fileContents),
+		},
+	}
+
+	_, err = ip.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).Create(ctx, configmap, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		ip.Server.Log().WithField("error", err).Warn("failed to create configmap")
+	}
+
+	pvc := &corev1.PersistentVolumeClaim{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "PersistentVolumeClaim",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: ip.Server.ID() + "-pvc",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{
+				corev1.PersistentVolumeAccessMode("ReadWriteOnce"),
+			},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					"storage": *resource.NewQuantity(ip.Server.DiskSpace(), resource.BinarySI),
+				},
+			},
+			StorageClassName: &[]string{config.Get().Cluster.StorageClass}[0],
+		},
+	}
+
+	_, err = ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Create(context.TODO(), pvc, metav1.CreateOptions{})
+	if err != nil {
+		return "", err
+	}
+
+	pod := &corev1.Pod{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Pod",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: ip.Server.ID() + "-installer",
+		},
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{
+				{
+					Name: "storage",
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: ip.Server.ID() + "-pvc",
+						},
+					},
+				},
+				{
+					Name: "configmap",
+					VolumeSource: corev1.VolumeSource{
+						ConfigMap: &corev1.ConfigMapVolumeSource{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: ip.Server.ID() + "-configmap",
+							},
+							DefaultMode: &[]int32{int32(0755)}[0],
+						},
+					},
+				},
+			},
+			Containers: []corev1.Container{
+				{
+					Name:  "installer",
+					Image: ip.Script.ContainerImage,
+					Command: []string{
+						"/mnt/install/install.sh",
+					},
+					Resources: corev1.ResourceRequirements{},
+					VolumeMounts: []corev1.VolumeMount{
+						{
+							Name:      "configmap",
+							MountPath: "/mnt/install",
+						},
+						{
+							Name:      "storage",
+							MountPath: "/mnt/server",
+						},
+					},
+				},
+			},
+			RestartPolicy: corev1.RestartPolicy("Never"),
+		},
+	}
+
+	// Env
+	for _, k := range ip.Server.GetEnvironmentVariables() {
+		a := strings.SplitN(k, "=", 2)
+
+		if a[0] != "" && a[1] != "" {
+			pod.Spec.Containers[0].Env = append(pod.Spec.Containers[0].Env, corev1.EnvVar{Name: a[0], Value: a[1]})
+		}
 	}
 
 	cfg := config.Get()
+	securityContext := pod.Spec.Containers[0].SecurityContext
 	if cfg.System.User.Rootless.Enabled {
-		conf.User = fmt.Sprintf("%d:%d", cfg.System.User.Rootless.ContainerUID, cfg.System.User.Rootless.ContainerGID)
-	}
-
-	tmpfsSize := strconv.Itoa(int(cfg.Docker.TmpfsSize))
-	hostConf := &container.HostConfig{
-		Mounts: []mount.Mount{
-			{
-				Target:   "/mnt/server",
-				Source:   ip.Server.Filesystem().Path(),
-				Type:     mount.TypeBind,
-				ReadOnly: false,
-			},
-			{
-				Target:   "/mnt/install",
-				Source:   ip.tempDir(),
-				Type:     mount.TypeBind,
-				ReadOnly: false,
-			},
-		},
-		Resources: ip.resourceLimits(),
-		Tmpfs: map[string]string{
-			"/tmp": "rw,exec,nosuid,size=" + tmpfsSize + "M",
-		},
-		DNS:         cfg.Docker.Network.Dns,
-		LogConfig:   cfg.Docker.ContainerLogConfig(),
-		Privileged:  true,
-		NetworkMode: container.NetworkMode(cfg.Docker.Network.Mode),
-		UsernsMode:  container.UsernsMode(cfg.Docker.UsernsMode),
+		securityContext.RunAsNonRoot = &[]bool{false}[0]
+		securityContext.RunAsUser = &[]int64{int64(cfg.System.User.Rootless.ContainerUID)}[0]
+		securityContext.RunAsGroup = &[]int64{int64(cfg.System.User.Rootless.ContainerGID)}[0]
 	}
 
 	// Ensure the root directory for the server exists properly before attempting
@@ -476,15 +486,11 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		}
 	}()
 
-	r, err := ip.client.ContainerCreate(ctx, conf, hostConf, nil, nil, ip.Server.ID()+"_installer")
+	r, err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		return "", err
 	}
-
-	ip.Server.Log().WithField("container_id", r.ID).Info("running installation script for server in container")
-	if err := ip.client.ContainerStart(ctx, r.ID, types.ContainerStartOptions{}); err != nil {
-		return "", err
-	}
+	ip.Server.Log().WithField("container_id", r.UID).Info("running installation script for server in container")
 
 	// Process the install event in the background by listening to the stream output until the
 	// container has stopped, at which point we'll disconnect from it.
@@ -493,79 +499,76 @@ func (ip *InstallationProcess) Execute() (string, error) {
 	// install can still run, the console just won't have any output.
 	go func(id string) {
 		ip.Server.Events().Publish(DaemonMessageEvent, "Starting installation process, this could take a few minutes...")
+
+		conditionFunc := func() (bool, error) {
+			pod, err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.TODO(), ip.Server.ID()+"-installer", metav1.GetOptions{})
+			if err != nil {
+				return false, err
+			}
+
+			switch pod.Status.Phase {
+			case corev1.PodRunning:
+				return true, nil
+			case corev1.PodFailed, corev1.PodSucceeded:
+				return false, nil
+			}
+			return false, nil
+		}
+
+		err = wait.PollInfinite(time.Second, conditionFunc)
+		if err != nil {
+			ip.Server.Log().WithField("error", err).Warn("pod never entered running phase")
+		}
+
 		if err := ip.StreamOutput(ctx, id); err != nil {
 			ip.Server.Log().WithField("error", err).Warn("error connecting to server install stream output")
 		}
-	}(r.ID)
+	}(string(r.UID))
 
-	sChan, eChan := ip.client.ContainerWait(ctx, r.ID, container.WaitConditionNotRunning)
-	select {
-	case err := <-eChan:
-		// Once the container has stopped running we can mark the install process as being completed.
-		if err == nil {
-			ip.Server.Events().Publish(DaemonMessageEvent, "Installation process completed.")
-		} else {
-			return "", err
+	conditionFunc := func() (bool, error) {
+		pod, err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.TODO(), ip.Server.ID()+"-installer", metav1.GetOptions{})
+		if err != nil {
+			return false, err
 		}
-	case <-sChan:
+
+		switch pod.Status.Phase {
+		case corev1.PodSucceeded:
+			return true, nil
+		case corev1.PodFailed:
+			return false, nil
+		}
+		return false, nil
 	}
 
-	return r.ID, nil
+	err = wait.PollInfinite(time.Second, conditionFunc)
+	// Once the container has stopped running we can mark the install process as being completed.
+	if err == nil {
+		ip.Server.Events().Publish(DaemonMessageEvent, "Installation process completed.")
+	} else {
+		return "", err
+	}
+
+	return string(r.UID), nil
 }
 
 // StreamOutput streams the output of the installation process to a log file in
 // the server configuration directory, as well as to a websocket listener so
 // that the process can be viewed in the panel by administrators.
 func (ip *InstallationProcess) StreamOutput(ctx context.Context, id string) error {
-	opts := types.ContainerLogsOptions{ShowStdout: true, ShowStderr: true, Follow: true}
-	reader, err := ip.client.ContainerLogs(ctx, id, opts)
+	req := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).GetLogs(ip.Server.ID()+"-installer", &corev1.PodLogOptions{
+		Follow: true,
+	})
+	podLogs, err := req.Stream(ctx)
 	if err != nil {
 		return err
 	}
-	defer reader.Close()
+	defer podLogs.Close()
 
-	err = system.ScanReader(reader, ip.Server.Sink(system.InstallSink).Push)
+	err = system.ScanReader(podLogs, ip.Server.Sink(system.InstallSink).Push)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		ip.Server.Log().WithFields(log.Fields{"container_id": id, "error": err}).Warn("error processing install output lines")
 	}
 	return nil
-}
-
-// resourceLimits returns resource limits for the installation container. This
-// looks at the globally defined install container limits and attempts to use
-// the higher of the two (defined limits & server limits). This allows for servers
-// with super low limits (e.g. Discord bots with 128Mb of memory) to perform more
-// intensive installation processes if needed.
-//
-// This also avoids a server with limits such as 4GB of memory from accidentally
-// consuming 2-5x the defined limits during the install process and causing
-// system instability.
-func (ip *InstallationProcess) resourceLimits() container.Resources {
-	limits := config.Get().Docker.InstallerLimits
-
-	// Create a copy of the configuration, so we're not accidentally making
-	// changes to the underlying server build data.
-	c := *ip.Server.Config()
-	cfg := c.Build
-	if cfg.MemoryLimit < limits.Memory {
-		cfg.MemoryLimit = limits.Memory
-	}
-	// Only apply the CPU limit if neither one is currently set to unlimited. If the
-	// installer CPU limit is unlimited don't even waste time with the logic, just
-	// set the config to unlimited for this.
-	if limits.Cpu == 0 {
-		cfg.CpuLimit = 0
-	} else if cfg.CpuLimit != 0 && cfg.CpuLimit < limits.Cpu {
-		cfg.CpuLimit = limits.Cpu
-	}
-
-	resources := cfg.AsContainerResources()
-	// Explicitly remove the PID limits for the installation container. These scripts are
-	// defined at an administrative level and users can't manually execute things like a
-	// fork bomb during this process.
-	resources.PidsLimit = nil
-
-	return resources
 }
 
 // SyncInstallState makes an HTTP request to the Panel instance notifying it that

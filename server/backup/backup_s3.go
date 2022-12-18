@@ -14,9 +14,9 @@ import (
 	"github.com/juju/ratelimit"
 	"github.com/mholt/archiver/v4"
 
-	"github.com/pterodactyl/wings/config"
-	"github.com/pterodactyl/wings/remote"
-	"github.com/pterodactyl/wings/server/filesystem"
+	"github.com/kubectyl/kuber/config"
+	"github.com/kubectyl/kuber/remote"
+	"github.com/kubectyl/kuber/server/filesystem"
 )
 
 type S3Backup struct {

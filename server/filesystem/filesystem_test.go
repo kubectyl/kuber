@@ -13,7 +13,7 @@ import (
 
 	. "github.com/franela/goblin"
 
-	"github.com/pterodactyl/wings/config"
+	"github.com/kubectyl/kuber/config"
 )
 
 func NewFs() (*Filesystem, *rootFs) {

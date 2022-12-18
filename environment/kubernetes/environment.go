@@ -1,20 +1,36 @@
-package docker
+package kubernetes
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 
 	"emperror.dev/errors"
 	"github.com/apex/log"
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/client"
+	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/httpstream"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/client-go/transport/spdy"
 
-	"github.com/pterodactyl/wings/environment"
-	"github.com/pterodactyl/wings/events"
-	"github.com/pterodactyl/wings/remote"
-	"github.com/pterodactyl/wings/system"
+	"github.com/kubectyl/kuber/config"
+	"github.com/kubectyl/kuber/environment"
+	"github.com/kubectyl/kuber/events"
+	"github.com/kubectyl/kuber/remote"
+	"github.com/kubectyl/kuber/system"
 )
 
 type Metadata struct {
@@ -39,7 +55,8 @@ type Environment struct {
 	meta *Metadata
 
 	// The Docker client being used for this instance.
-	client *client.Client
+	config *rest.Config
+	client *kubernetes.Clientset
 
 	// Controls the hijacked response stream which exists only when we're attached to
 	// the running container instance.
@@ -55,6 +72,8 @@ type Environment struct {
 
 	// Tracks the environment state.
 	st *system.AtomicString
+
+	diskUsed int64
 }
 
 // New creates a new base Docker environment. The ID passed through will be the
@@ -62,7 +81,7 @@ type Environment struct {
 // unique per-server (we use the UUID by default). The container does not need
 // to exist at this point.
 func New(id string, m *Metadata, c *environment.Configuration) (*Environment, error) {
-	cli, err := environment.Docker()
+	config, cli, err := environment.Cluster()
 	if err != nil {
 		return nil, err
 	}
@@ -71,12 +90,130 @@ func New(id string, m *Metadata, c *environment.Configuration) (*Environment, er
 		Id:            id,
 		Configuration: c,
 		meta:          m,
+		config:        config,
 		client:        cli,
 		st:            system.NewAtomicString(environment.ProcessOfflineState),
 		emitter:       events.NewBus(),
 	}
 
 	return e, nil
+}
+
+type ContextUpgrader struct {
+	spdy.Upgrader
+	Context context.Context
+}
+
+func (u ContextUpgrader) NewConnection(resp *http.Response) (httpstream.Connection, error) {
+	conn, err := u.Upgrader.NewConnection(resp)
+
+	go func() {
+		<-u.Context.Done()
+		conn.Close()
+	}()
+
+	return conn, err
+}
+
+// From remotecommand.NewSPDYExecutor
+func (e *Environment) executor(ctx context.Context, url *url.URL) (remotecommand.Executor, error) {
+	wrapper, upgradeRoundTripper, err := spdy.RoundTripperFor(e.config)
+	if err != nil {
+		return nil, err
+	}
+
+	wrappedUpgrader := ContextUpgrader{
+		Upgrader: upgradeRoundTripper,
+		Context:  ctx,
+	}
+
+	return remotecommand.NewSPDYExecutorForTransports(wrapper, wrappedUpgrader, "POST", url)
+}
+
+func (e *Environment) CachedUsage() int64 {
+	return atomic.LoadInt64(&e.diskUsed)
+}
+
+func (e *Environment) DiskUsage(allowStaleValue bool) (int64, error) {
+	req := e.client.CoreV1().RESTClient().
+		Get().
+		Namespace(config.Get().Cluster.Namespace).
+		Resource("pods").
+		Name(e.Id).
+		SubResource("exec").
+		VersionedParams(&v1.PodExecOptions{
+			Container: "process",
+			Command:   []string{"bash", "-c", "du -bs /home/container | awk '{print $1}'"},
+			Stdin:     false,
+			Stdout:    true,
+			Stderr:    true,
+			TTY:       false,
+		}, scheme.ParameterCodec)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	executor, err := e.executor(ctx, req.URL())
+	if err != nil {
+		return 0, err
+	}
+
+	var stdout, stderr bytes.Buffer
+
+	defer cancel()
+	err = executor.Stream(remotecommand.StreamOptions{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	s := strings.TrimSuffix(stdout.String(), "\n")
+	i, _ := strconv.Atoi(s)
+
+	return int64(i), err
+}
+
+func (e *Environment) HasSpaceAvailable(allowStaleValue bool) bool {
+	size, err := e.DiskUsage(allowStaleValue)
+	if err != nil {
+		fmt.Println("Error: ", err)
+	}
+
+	atomic.StoreInt64(&e.diskUsed, size)
+
+	return size <= (e.Config().Limits().DiskSpace * 1_000_000)
+}
+
+// The same concept as HasSpaceAvailable however this will return an error if there is
+// no space, rather than a boolean value.
+func (e *Environment) HasSpaceErr(allowStaleValue bool) error {
+	if !e.HasSpaceAvailable(allowStaleValue) {
+		return fmt.Errorf("No space !!")
+	}
+	return nil
+}
+
+func (e *Environment) ReturnJSON() ([]byte, error) {
+	out := map[string]interface{}{}
+
+	svc, err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).Get(context.TODO(), "svc-"+e.Id, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	pod, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.TODO(), e.Id, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	out["svc"] = svc
+	out["pod"] = pod
+
+	json, _ := json.Marshal(out)
+
+	return json, nil
 }
 
 func (e *Environment) log() *log.Entry {
@@ -115,11 +252,11 @@ func (e *Environment) Events() *events.Bus {
 // name as the lookup parameter in addition to the longer ID auto-assigned when
 // the container is created.
 func (e *Environment) Exists() (bool, error) {
-	_, err := e.ContainerInspect(context.Background())
+	_, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.Background(), e.Id, metav1.GetOptions{})
 	if err != nil {
 		// If this error is because the container instance wasn't found via Docker we
 		// can safely ignore the error and just return false.
-		if client.IsErrNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
 		return false, err
@@ -137,17 +274,20 @@ func (e *Environment) Exists() (bool, error) {
 //
 // @see docker/client/errors.go
 func (e *Environment) IsRunning(ctx context.Context) (bool, error) {
-	c, err := e.ContainerInspect(ctx)
+	c, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(ctx, e.Id, metav1.GetOptions{})
 	if err != nil {
 		return false, err
 	}
-	return c.State.Running, nil
+	if c.Status.Phase == v1.PodRunning {
+		return true, nil
+	}
+	return false, nil
 }
 
 // ExitState returns the container exit state, the exit code and whether or not
 // the container was killed by the OOM killer.
 func (e *Environment) ExitState() (uint32, bool, error) {
-	c, err := e.ContainerInspect(context.Background())
+	c, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.Background(), e.Id, metav1.GetOptions{})
 	if err != nil {
 		// I'm not entirely sure how this can happen to be honest. I tried deleting a
 		// container _while_ a server was running and wings gracefully saw the crash and
@@ -158,12 +298,23 @@ func (e *Environment) ExitState() (uint32, bool, error) {
 		// so that's a mystery that will have to go unsolved.
 		//
 		// @see https://github.com/pterodactyl/panel/issues/2003
-		if client.IsErrNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return 1, false, nil
 		}
 		return 0, false, err
 	}
-	return uint32(c.State.ExitCode), c.State.OOMKilled, nil
+
+	if c.Status.Phase != v1.PodRunning && len(c.Status.ContainerStatuses) != 0 {
+		if c.Status.ContainerStatuses[0].State.Terminated != nil {
+			// OOMKilled
+			if c.Status.ContainerStatuses[0].State.Terminated.ExitCode == 137 {
+				return 137, true, nil
+			}
+
+			return uint32(c.Status.ContainerStatuses[0].State.Terminated.ExitCode), false, nil
+		}
+	}
+	return 1, false, nil
 }
 
 // Config returns the environment configuration allowing a process to make
