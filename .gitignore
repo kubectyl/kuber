@@ -36,8 +36,7 @@
 /coverage.out
 
 # The built executable
-wings
-wings.exe
+kuber
 
 # IDE/Editor files (VS Code)
 /.vscode
