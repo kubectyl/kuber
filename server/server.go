@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 
@@ -12,6 +11,7 @@ import (
 	"github.com/apex/log"
 	"github.com/creasty/defaults"
 	"github.com/goccy/go-json"
+	v1 "k8s.io/api/core/v1"
 
 	"github.com/kubectyl/kuber/config"
 	"github.com/kubectyl/kuber/environment"
@@ -22,7 +22,7 @@ import (
 )
 
 // Server is the high level definition for a server instance being controlled
-// by Wings.
+// by Kuber.
 type Server struct {
 	// Internal mutex used to block actions that need to occur sequentially, such as
 	// writing the configuration to the disk.
@@ -50,7 +50,7 @@ type Server struct {
 	emitter *events.Bus
 
 	// Defines the process configuration for the server instance. This is dynamically
-	// fetched from the Pterodactyl Server instance each time the server process is
+	// fetched from the Kubectyl Server instance each time the server process is
 	// started, and then cached here.
 	procConfig *remote.ProcessConfiguration
 
@@ -170,12 +170,12 @@ func (s *Server) Log() *log.Entry {
 	return log.WithField("server", s.ID())
 }
 
-// Sync syncs the state of the server on the Panel with Wings. This ensures that
+// Sync syncs the state of the server on the Panel with Kuber. This ensures that
 // we're always using the state of the server from the Panel and allows us to
-// not require successful API calls to Wings to do things.
+// not require successful API calls to Kuber to do things.
 //
 // This also means mass actions can be performed against servers on the Panel
-// and they will automatically sync with Wings when the server is started.
+// and they will automatically sync with Kuber when the server is started.
 func (s *Server) Sync() error {
 	cfg, err := s.client.GetServerConfiguration(s.Context(), s.ID())
 	if err != nil {
@@ -239,13 +239,9 @@ func (s *Server) ReadLogfile(len int) ([]string, error) {
 // Initializes a server instance. This will run through and ensure that the environment
 // for the server is setup, and that all of the necessary files are created.
 func (s *Server) CreateEnvironment() error {
-	// Ensure the data directory exists before getting too far through this process.
-	if err := s.EnsureDataDirectoryExists(); err != nil {
-		return err
-	}
-
 	// return s.Environment.Create()
-	return nil
+	return s.Environment.CreateService()
+	// return nil
 }
 
 // Checks if the server is marked as being suspended or not on the system.
@@ -263,25 +259,6 @@ func (s *Server) ProcessConfiguration() *remote.ProcessConfiguration {
 // Filesystem returns an instance of the filesystem for this server.
 func (s *Server) Filesystem() *filesystem.Filesystem {
 	return s.fs
-}
-
-// EnsureDataDirectoryExists ensures that the data directory for the server
-// instance exists.
-func (s *Server) EnsureDataDirectoryExists() error {
-	if _, err := os.Lstat(s.fs.Path()); err != nil {
-		if os.IsNotExist(err) {
-			s.Log().Debug("server: creating root directory and setting permissions")
-			if err := os.MkdirAll(s.fs.Path(), 0o700); err != nil {
-				return errors.WithStack(err)
-			}
-			if err := s.fs.Chown("/"); err != nil {
-				s.Log().WithField("error", err).Warn("server: failed to chown server data directory")
-			}
-		} else {
-			return errors.WrapIf(err, "server: failed to stat server root directory")
-		}
-	}
-	return nil
 }
 
 // OnStateChange sets the state of the server internally. This function handles crash detection as
@@ -340,13 +317,14 @@ func (s *Server) IsRunning() bool {
 }
 
 // APIResponse is a type returned when requesting details about a single server
-// instance on Wings. This includes the information needed by the Panel in order
+// instance on Kuber. This includes the information needed by the Panel in order
 // to show resource utilization and the current state on this system.
 type APIResponse struct {
 	State         string        `json:"state"`
 	IsSuspended   bool          `json:"is_suspended"`
 	Utilization   ResourceUsage `json:"utilization"`
 	Configuration Configuration `json:"configuration"`
+	Services      []v1.Service  `json:"services"`
 }
 
 // ToAPIResponse returns the server struct as an API object that can be consumed
@@ -357,5 +335,6 @@ func (s *Server) ToAPIResponse() APIResponse {
 		IsSuspended:   s.IsSuspended(),
 		Utilization:   s.Proc(),
 		Configuration: *s.Config(),
+		Services:      s.Environment.GetServiceDetails(),
 	}
 }

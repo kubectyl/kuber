@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/kubectyl/kuber/events"
+	v1 "k8s.io/api/core/v1"
 )
 
 const (
@@ -46,11 +47,6 @@ type ProcessEnvironment interface {
 	// a server process for this specific server instance.
 	IsRunning(ctx context.Context) (bool, error)
 
-	// Performs an update of server resource limits without actually stopping the server
-	// process. This only executes if the environment supports it, otherwise it is
-	// a no-op.
-	InSituUpdate() error
-
 	// Runs before the environment is started. If an error is returned starting will
 	// not occur, otherwise proceeds as normal.
 	OnBeforeStart(ctx context.Context) error
@@ -87,6 +83,8 @@ type ProcessEnvironment interface {
 	// server.
 	Create() error
 
+	CreateService() error
+
 	// Attach attaches to the server console environment and allows piping the output
 	// to a websocket or other internal tool to monitor output. Also allows you to later
 	// send data into the environment's stdin.
@@ -95,16 +93,8 @@ type ProcessEnvironment interface {
 	// Sends the provided command to the running server instance.
 	SendCommand(string) error
 
-	CachedUsage() int64
-
-	DiskUsage(bool) (int64, error)
-
-	HasSpaceAvailable(bool) bool
-
-	HasSpaceErr(bool) error
-
-	// Return pod and service json
-	ReturnJSON() ([]byte, error)
+	// Return service details
+	GetServiceDetails() []v1.Service
 
 	// Reads the log file for the process from the end backwards until the provided
 	// number of lines is met.

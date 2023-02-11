@@ -10,7 +10,7 @@ type SinkName string
 
 const (
 	// LogSink handles console output for game servers, including messages being
-	// sent via Wings to the console instance.
+	// sent via Kuber to the console instance.
 	LogSink SinkName = "log"
 	// InstallSink handles installation output for a server.
 	InstallSink SinkName = "install"

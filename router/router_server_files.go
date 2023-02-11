@@ -47,7 +47,7 @@ func getServerFileContents(c *gin.Context) {
 		return
 	}
 
-	c.Header("X-Mime-Type", st.Mimetype)
+	// c.Header("X-Mime-Type", m.String())
 	c.Header("Content-Length", strconv.Itoa(int(st.Size())))
 	// If a download parameter is included in the URL go ahead and attach the necessary headers
 	// so that the file can be downloaded.
@@ -413,16 +413,17 @@ func postServerCompressFiles(c *gin.Context) {
 		return
 	}
 
-	f, err := s.Filesystem().CompressFiles(data.RootPath, data.Files)
-	if err != nil {
-		middleware.CaptureAndAbort(c, err)
-		return
-	}
+	// TODO: archive sftp files
+	// f, err := s.Filesystem().CompressFiles(data.RootPath, data.Files)
+	// if err != nil {
+	// 	middleware.CaptureAndAbort(c, err)
+	// 	return
+	// }
 
-	c.JSON(http.StatusOK, &filesystem.Stat{
-		FileInfo: f,
-		Mimetype: "application/tar+gzip",
-	})
+	// c.JSON(http.StatusOK, &filesystem.Stat{
+	// 	FileInfo: f,
+	// 	Mimetype: "application/tar+gzip",
+	// })
 }
 
 // postServerDecompressFiles receives the HTTP request and starts the process
@@ -444,7 +445,7 @@ func postServerDecompressFiles(c *gin.Context) {
 	if err != nil {
 		if filesystem.IsErrorCode(err, filesystem.ErrCodeUnknownArchive) {
 			lg.WithField("error", err).Warn("failed to decompress file: unknown archive format")
-			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "The archive provided is in a format Wings does not understand."})
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "The archive provided is in a format Kuber does not understand."})
 			return
 		}
 		middleware.CaptureAndAbort(c, err)

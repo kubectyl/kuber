@@ -5,7 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"os/exec"
+	"runtime"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/apex/log"
 	"github.com/gin-gonic/gin"
@@ -19,7 +25,7 @@ import (
 	"github.com/kubectyl/kuber/system"
 )
 
-// Returns information about the system that wings is running on.
+// Returns information about the system that kuber is running on.
 func getSystemInformation(c *gin.Context) {
 	i, err := system.GetSystemInformation()
 	if err != nil {
@@ -44,12 +50,15 @@ func getSystemInformation(c *gin.Context) {
 
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
 	if err != nil {
-		fmt.Printf(" error in discoveryClient %v", err)
+		middleware.CaptureAndAbort(c, err)
+		return
 	}
 
 	information, err := discoveryClient.ServerVersion()
 	if err != nil {
-		fmt.Println("Error while fetching server version information", err)
+		fmt.Println("discoveryClient error")
+		middleware.CaptureAndAbort(c, err)
+		return
 	}
 
 	c.JSON(http.StatusOK, struct {
@@ -74,7 +83,7 @@ func getSystemInformation(c *gin.Context) {
 }
 
 // Returns all the servers that are registered and configured correctly on
-// this wings instance.
+// this kuber instance.
 func getAllServers(c *gin.Context) {
 	servers := middleware.ExtractManager(c).All()
 	out := make([]server.APIResponse, len(servers), len(servers))
@@ -84,7 +93,7 @@ func getAllServers(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
-// Creates a new server on the wings daemon and begins the installation process
+// Creates a new server on the kuber daemon and begins the installation process
 // for it.
 func postCreateServer(c *gin.Context) {
 	manager := middleware.ExtractManager(c)
@@ -142,7 +151,7 @@ func postCreateServer(c *gin.Context) {
 	c.Status(http.StatusAccepted)
 }
 
-// Updates the running configuration for this Wings instance.
+// Updates the running configuration for this Kuber instance.
 func postUpdateConfiguration(c *gin.Context) {
 	cfg := config.Get()
 	if err := c.BindJSON(&cfg); err != nil {
@@ -169,4 +178,46 @@ func postUpdateConfiguration(c *gin.Context) {
 	// state to use this new configuration struct.
 	config.Set(cfg)
 	c.Status(http.StatusNoContent)
+
+	if cfg.System.AutoRestart {
+		go func() {
+			var wg sync.WaitGroup
+
+			t1 := time.NewTimer(time.Second * 5)
+			wg.Add(1)
+
+			go func() {
+				defer wg.Done()
+				<-t1.C
+				RestartSelf()
+			}()
+
+			wg.Wait()
+		}()
+	}
+
+	// c.Status(http.StatusNoContent)
+}
+
+func RestartSelf() error {
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	args := os.Args
+	env := os.Environ()
+	// Windows does not support exec syscall.
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command(self, args[1:]...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+		cmd.Env = env
+		err := cmd.Run()
+		if err == nil {
+			os.Exit(0)
+		}
+		return err
+	}
+	return syscall.Exec(self, args, env)
 }

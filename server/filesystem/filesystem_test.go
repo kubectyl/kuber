@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	. "github.com/franela/goblin"
+	"github.com/pkg/sftp"
 
 	"github.com/kubectyl/kuber/config"
 )
@@ -25,7 +26,7 @@ func NewFs() (*Filesystem, *rootFs) {
 		},
 	})
 
-	tmpDir, err := os.MkdirTemp(os.TempDir(), "pterodactyl")
+	tmpDir, err := os.MkdirTemp(os.TempDir(), "kubectyl")
 	if err != nil {
 		panic(err)
 	}
@@ -35,7 +36,7 @@ func NewFs() (*Filesystem, *rootFs) {
 
 	rfs.reset()
 
-	fs := New(filepath.Join(tmpDir, "/server"), 0, []string{})
+	fs := New(filepath.Join(tmpDir, "/server"), 0, []string{}, "")
 	fs.isTest = true
 
 	return fs, &rfs
@@ -45,7 +46,7 @@ type rootFs struct {
 	root string
 }
 
-func getFileContent(file *os.File) string {
+func getFileContent(file *sftp.File) string {
 	var w bytes.Buffer
 	if _, err := bufio.NewReader(file).WriteTo(&w); err != nil {
 		panic(err)

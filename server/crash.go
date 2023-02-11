@@ -38,7 +38,7 @@ func (cd *CrashHandler) SetLastCrash(t time.Time) {
 // This function assumes it is called under circumstances where a crash is suspected
 // of occurring. It will not do anything to determine if it was actually a crash, just
 // look at the exit state and check if it meets the criteria of being called a crash
-// by Wings.
+// by Kuber.
 //
 // If the server is determined to have crashed, the process will be restarted and the
 // counter for the server will be incremented.

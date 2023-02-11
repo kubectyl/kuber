@@ -386,6 +386,10 @@ func (h *Handler) HandleInbound(ctx context.Context, m Message) error {
 				return nil
 			}
 
+			if h.server.Environment.State() == environment.ProcessOfflineState {
+				return nil
+			}
+
 			logs, err := h.server.Environment.Readlog(config.Get().System.WebsocketLogCount)
 			if err != nil {
 				return err
@@ -405,16 +409,6 @@ func (h *Handler) HandleInbound(ctx context.Context, m Message) error {
 			b, _ := json.Marshal(h.server.Proc())
 			_ = h.SendJson(Message{
 				Event: server.StatsEvent,
-				Args:  []string{string(b)},
-			})
-
-			return nil
-		}
-	case SendJsonEvent:
-		{
-			b, _ := h.server.Environment.ReturnJSON()
-			_ = h.SendJson(Message{
-				Event: server.JsonEvent,
 				Args:  []string{string(b)},
 			})
 

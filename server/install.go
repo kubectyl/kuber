@@ -305,7 +305,7 @@ func (ip *InstallationProcess) AfterExecute(containerId string) error {
 	// variables passed into the container to make debugging things a little easier.
 	ip.Server.Log().WithField("path", ip.GetLogPath()).Debug("writing most recent installation logs to disk")
 
-	tmpl, err := template.New("header").Parse(`Pterodactyl Server Installation Log
+	tmpl, err := template.New("header").Parse(`Kubectyl Server Installation Log
 
 |
 | Details
@@ -359,7 +359,8 @@ func (ip *InstallationProcess) Execute() (string, error) {
 			APIVersion: "v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: ip.Server.ID() + "-configmap",
+			Name:      ip.Server.ID() + "-configmap",
+			Namespace: config.Get().Cluster.Namespace,
 		},
 		Data: map[string]string{
 			"install.sh": string(fileContents),
@@ -377,7 +378,8 @@ func (ip *InstallationProcess) Execute() (string, error) {
 			APIVersion: "v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: ip.Server.ID() + "-pvc",
+			Name:      ip.Server.ID() + "-pvc",
+			Namespace: config.Get().Cluster.Namespace,
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{
@@ -403,7 +405,8 @@ func (ip *InstallationProcess) Execute() (string, error) {
 			APIVersion: "v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: ip.Server.ID() + "-installer",
+			Name:      ip.Server.ID() + "-installer",
+			Namespace: config.Get().Cluster.Namespace,
 		},
 		Spec: corev1.PodSpec{
 			Volumes: []corev1.Volume{
@@ -431,6 +434,10 @@ func (ip *InstallationProcess) Execute() (string, error) {
 				{
 					Name:  "installer",
 					Image: ip.Script.ContainerImage,
+					SecurityContext: &corev1.SecurityContext{
+						AllowPrivilegeEscalation: &[]bool{false}[0],
+						RunAsUser:                &[]int64{int64(0)}[0],
+					},
 					Command: []string{
 						"/mnt/install/install.sh",
 					},
@@ -466,14 +473,6 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		securityContext.RunAsNonRoot = &[]bool{false}[0]
 		securityContext.RunAsUser = &[]int64{int64(cfg.System.User.Rootless.ContainerUID)}[0]
 		securityContext.RunAsGroup = &[]int64{int64(cfg.System.User.Rootless.ContainerGID)}[0]
-	}
-
-	// Ensure the root directory for the server exists properly before attempting
-	// to trigger the reinstall of the server. It is possible the directory would
-	// not exist when this runs if Wings boots with a missing directory and a user
-	// triggers a reinstall before trying to start the server.
-	if err := ip.Server.EnsureDataDirectoryExists(); err != nil {
-		return "", err
 	}
 
 	ip.Server.Log().WithField("install_script", ip.tempDir()+"/install.sh").Info("creating install container for server process")

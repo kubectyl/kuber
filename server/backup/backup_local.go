@@ -1,17 +1,29 @@
 package backup
 
 import (
+	"archive/tar"
 	"context"
+	"fmt"
 	"io"
+	"log"
 	"os"
+	"path"
+	"strings"
 
 	"emperror.dev/errors"
 	"github.com/juju/ratelimit"
 	"github.com/mholt/archiver/v4"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/kubectyl/kuber/config"
+	"github.com/kubectyl/kuber/environment"
 	"github.com/kubectyl/kuber/remote"
 	"github.com/kubectyl/kuber/server/filesystem"
+
+	corev1 "k8s.io/api/core/v1"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
 type LocalBackup struct {
@@ -59,15 +71,20 @@ func (b *LocalBackup) WithLogContext(c map[string]interface{}) {
 
 // Generate generates a backup of the selected files and pushes it to the
 // defined location for this instance.
-func (b *LocalBackup) Generate(ctx context.Context, basePath, ignore string) (*ArchiveDetails, error) {
+func (b *LocalBackup) Generate(ctx context.Context, sID, ignore string) (*ArchiveDetails, error) {
 	a := &filesystem.Archive{
-		BasePath: basePath,
+		BasePath: path.Join(config.Get().System.BackupDirectory, b.Identifier()),
 		Ignore:   ignore,
 	}
 
 	b.log().WithField("path", b.Path()).Info("creating backup for server")
-	if err := a.Create(ctx, b.Path()); err != nil {
-		return nil, err
+	defer os.RemoveAll(a.BasePath)
+
+	if err := b.copyFromPod("/home/container", sID); err != nil {
+		if err != io.EOF && err != io.ErrUnexpectedEOF {
+			fmt.Println("Error2: ", err)
+			return nil, err
+		}
 	}
 	b.log().Info("created backup successfully")
 
@@ -76,6 +93,102 @@ func (b *LocalBackup) Generate(ctx context.Context, basePath, ignore string) (*A
 		return nil, errors.WrapIf(err, "backup: failed to get archive details for local backup")
 	}
 	return ad, nil
+}
+
+func InitRestClient() (*rest.Config, *corev1client.CoreV1Client, error) {
+	// cfg := config.Get().Cluster
+
+	// c := &rest.Config{
+	// 	Host:        cfg.Host,
+	// 	BearerToken: cfg.BearerToken,
+	// 	TLSClientConfig: rest.TLSClientConfig{
+	// 		Insecure: cfg.Insecure,
+	// 	},
+	// }
+
+	c, _, _ := environment.Cluster()
+
+	client, err := corev1client.NewForConfig(c)
+	if err != nil {
+		panic(err)
+	}
+	return c, client, err
+}
+
+func (b *Backup) copyFromPod(srcPath, sID string) error {
+	restconfig, coreclient, err := InitRestClient()
+	reader, outStream := io.Pipe()
+
+	req := coreclient.RESTClient().
+		Get().
+		Namespace(config.Get().Cluster.Namespace).
+		Resource("pods").
+		Name(sID).
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: "process",
+			Command:   []string{"bash", "-c", fmt.Sprintf("tar cf - %s | cat", srcPath)},
+			Stdin:     false,
+			Stdout:    true,
+			Stderr:    false,
+			TTY:       false,
+		}, scheme.ParameterCodec)
+
+	exec, err := remotecommand.NewSPDYExecutor(restconfig, "POST", req.URL())
+	if err != nil {
+		log.Fatalf("error %s\n", err)
+		return err
+	}
+
+	go func() {
+		defer outStream.Close()
+		err = exec.StreamWithContext(context.Background(), remotecommand.StreamOptions{
+			Stdout: outStream,
+		})
+	}()
+
+	prefix := strings.TrimLeft(srcPath, "/")
+	prefix = path.Clean(prefix)
+	prefix = string(prefix)
+	err = b.untarAll(reader, prefix)
+	return err
+}
+
+func (b *Backup) untarAll(reader io.Reader, prefix string) error {
+	out, err := os.Create(b.Path())
+	if err != nil {
+		log.Fatalln("Error writing archive:", err)
+	}
+	defer out.Close()
+
+	tw := tar.NewWriter(out)
+	defer tw.Close()
+
+	tarReader := tar.NewReader(reader)
+
+	for {
+		header, err := tarReader.Next()
+		if err != nil {
+			if err != io.EOF {
+				return err
+			}
+			break
+		}
+
+		if header.FileInfo().IsDir() {
+			continue
+		}
+
+		header.Name = header.Name[len(prefix):]
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+		if _, err := io.Copy(tw, tarReader); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // Restore will walk over the archive and call the callback function for each

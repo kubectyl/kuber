@@ -1,14 +1,13 @@
 package filesystem
 
 import (
+	"fmt"
+	"path"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
-	"emperror.dev/errors"
 	"github.com/apex/log"
-	"github.com/karrick/godirwalk"
 )
 
 type SpaceCheckingOpts struct {
@@ -142,7 +141,7 @@ func (fs *Filesystem) updateCachedDiskUsage() (int64, error) {
 	// will have effectively no impact), or there is nothing in the cache, in which case we need to
 	// grab the size of their data directory. This is a taxing operation, so we want to store it in
 	// the cache once we've gotten it.
-	size, err := fs.DirectorySize("/")
+	size, err := fs.directorySize(fs.root)
 
 	// Always cache the size, even if there is an error. We want to always return that value
 	// so that we don't cause an endless loop of determining the disk size if there is a temporary
@@ -155,43 +154,40 @@ func (fs *Filesystem) updateCachedDiskUsage() (int64, error) {
 }
 
 // Determines the directory size of a given location by running parallel tasks to iterate
-// through all of the folders. Returns the size in bytes. This can be a fairly taxing operation
-// on locations with tons of files, so it is recommended that you cache the output.
-func (fs *Filesystem) DirectorySize(dir string) (int64, error) {
-	d, err := fs.SafePath(dir)
-	if err != nil {
+// through all of the folders. Returns the size in bytes.
+func (fs *Filesystem) directorySize(dir string) (int64, error) {
+	var size int64
+	var wg sync.WaitGroup
+
+	connection, err := fs.manager.GetConnection()
+	if connection == nil {
+		return 0, nil
+	} else if err != nil {
 		return 0, err
 	}
 
-	var size int64
-	var st syscall.Stat_t
+	files, err := connection.sftpClient.ReadDir(dir)
+	if err != nil {
+		fmt.Println("directorySize Error: ", err)
+		return 0, err
+	}
 
-	err = godirwalk.Walk(d, &godirwalk.Options{
-		Unsorted: true,
-		Callback: func(p string, e *godirwalk.Dirent) error {
-			// If this is a symlink then resolve the final destination of it before trying to continue walking
-			// over its contents. If it resolves outside the server data directory just skip everything else for
-			// it. Otherwise, allow it to continue.
-			if e.IsSymlink() {
-				if _, err := fs.SafePath(p); err != nil {
-					if IsErrorCode(err, ErrCodePathResolution) {
-						return godirwalk.SkipThis
-					}
+	for _, f := range files {
+		if f.IsDir() {
+			wg.Add(1)
+			go func(p string) {
+				defer wg.Done()
+				directorySize, _ := fs.directorySize(p)
+				size += directorySize
+			}(path.Join(dir, f.Name()))
+		} else {
+			size += f.Size()
+		}
+	}
 
-					return err
-				}
-			}
+	wg.Wait()
 
-			if !e.IsDir() {
-				syscall.Lstat(p, &st)
-				atomic.AddInt64(&size, st.Size)
-			}
-
-			return nil
-		},
-	})
-
-	return size, errors.WrapIf(err, "server/filesystem: directorysize: failed to walk directory")
+	return size, nil
 }
 
 // Helper function to determine if a server has space available for a file of a given size.

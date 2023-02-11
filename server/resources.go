@@ -33,7 +33,7 @@ func (s *Server) Proc() ResourceUsage {
 	s.resources.mu.Lock()
 	defer s.resources.mu.Unlock()
 	// Store the updated disk usage when requesting process usage.
-	atomic.StoreInt64(&s.resources.Disk, s.Environment.CachedUsage())
+	atomic.StoreInt64(&s.resources.Disk, s.Filesystem().CachedUsage())
 	//goland:noinspection GoVetCopyLock
 	return s.resources
 }

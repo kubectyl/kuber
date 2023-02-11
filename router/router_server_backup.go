@@ -49,7 +49,7 @@ func postServerBackup(c *gin.Context) {
 
 	go func(b backup.BackupInterface, s *server.Server, logger *log.Entry) {
 		if err := s.Backup(b); err != nil {
-			logger.WithField("error", errors.WithStackIf(err)).Error("router: failed to generate server backup")
+			// logger.WithField("error", errors.WithStackIf(err)).Error("router: failed to generate server backup")
 		}
 	}(adapter, s, logger)
 
@@ -71,7 +71,7 @@ func postServerRestoreBackup(c *gin.Context) {
 	logger := middleware.ExtractLogger(c)
 
 	var data struct {
-		Adapter           backup.AdapterType `binding:"required,oneof=wings s3" json:"adapter"`
+		Adapter           backup.AdapterType `binding:"required,oneof=kuber s3" json:"adapter"`
 		TruncateDirectory bool               `json:"truncate_directory"`
 		// A UUID is always required for this endpoint, however the download URL
 		// is only present when the given adapter type is s3.

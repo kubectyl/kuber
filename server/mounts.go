@@ -21,12 +21,12 @@ type Mount environment.Mount
 // in most scenarios.
 func (s *Server) Mounts() []environment.Mount {
 	m := []environment.Mount{
-		{
-			Default:  true,
-			Target:   "/home/container",
-			Source:   s.Filesystem().Path(),
-			ReadOnly: false,
-		},
+		// {
+		// 	Default:  true,
+		// 	Target:   "/home/container",
+		// 	Source:   s.Filesystem().Path(),
+		// 	ReadOnly: false,
+		// },
 	}
 
 	// Also include any of this server's custom mounts when returning them.

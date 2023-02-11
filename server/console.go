@@ -18,7 +18,7 @@ var appName string
 var appNameSync sync.Once
 
 // PublishConsoleOutputFromDaemon sends output to the server console formatted
-// to appear correctly as being sent from Wings.
+// to appear correctly as being sent from Kuber.
 func (s *Server) PublishConsoleOutputFromDaemon(data string) {
 	appNameSync.Do(func() {
 		appName = config.Get().AppName

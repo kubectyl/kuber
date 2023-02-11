@@ -17,7 +17,7 @@ const ErrCronRunning = errors.Sentinel("cron: job already running")
 
 var o system.AtomicBool
 
-// Scheduler configures the internal cronjob system for Wings and returns the scheduler
+// Scheduler configures the internal cronjob system for Kuber and returns the scheduler
 // instance to the caller. This should only be called once per application lifecycle, additional
 // calls will result in an error being returned.
 func Scheduler(ctx context.Context, m *server.Manager) (*gocron.Scheduler, error) {
@@ -30,12 +30,6 @@ func Scheduler(ctx context.Context, m *server.Manager) (*gocron.Scheduler, error
 	}
 
 	activity := activityCron{
-		mu:      system.NewAtomicBool(false),
-		manager: m,
-		max:     config.Get().System.ActivitySendCount,
-	}
-
-	sftp := sftpCron{
 		mu:      system.NewAtomicBool(false),
 		manager: m,
 		max:     config.Get().System.ActivitySendCount,
@@ -54,17 +48,6 @@ func Scheduler(ctx context.Context, m *server.Manager) (*gocron.Scheduler, error
 				l.WithField("cron", "activity").Warn("activity process is already running, skipping...")
 			} else {
 				l.WithField("cron", "activity").WithField("error", err).Error("activity process failed to execute")
-			}
-		}
-	})
-
-	_, _ = s.Tag("sftp").Every(interval).Do(func() {
-		l.WithField("cron", "sftp").Debug("sending sftp events to Panel")
-		if err := sftp.Run(ctx); err != nil {
-			if errors.Is(err, ErrCronRunning) {
-				l.WithField("cron", "sftp").Warn("sftp events process already running, skipping...")
-			} else {
-				l.WithField("cron", "sftp").WithField("error", err).Error("sftp events process failed to execute")
 			}
 		}
 	})

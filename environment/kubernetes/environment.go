@@ -1,30 +1,19 @@
 package kubernetes
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
-	"strconv"
-	"strings"
 	"sync"
-	"sync/atomic"
 
 	"emperror.dev/errors"
 	"github.com/apex/log"
-	"github.com/docker/docker/api/types"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/httpstream"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
-	"k8s.io/client-go/transport/spdy"
 
 	"github.com/kubectyl/kuber/config"
 	"github.com/kubectyl/kuber/environment"
@@ -60,7 +49,7 @@ type Environment struct {
 
 	// Controls the hijacked response stream which exists only when we're attached to
 	// the running container instance.
-	stream *types.HijackedResponse
+	stream remotecommand.Executor
 
 	// Holds the stats stream used by the polling commands so that we can easily close it out.
 	stats io.ReadCloser
@@ -72,11 +61,9 @@ type Environment struct {
 
 	// Tracks the environment state.
 	st *system.AtomicString
-
-	diskUsed int64
 }
 
-// New creates a new base Docker environment. The ID passed through will be the
+// New creates a new base Kubernetes environment. The ID passed through will be the
 // ID that is used to reference the container from here on out. This should be
 // unique per-server (we use the UUID by default). The container does not need
 // to exist at this point.
@@ -99,121 +86,15 @@ func New(id string, m *Metadata, c *environment.Configuration) (*Environment, er
 	return e, nil
 }
 
-type ContextUpgrader struct {
-	spdy.Upgrader
-	Context context.Context
-}
-
-func (u ContextUpgrader) NewConnection(resp *http.Response) (httpstream.Connection, error) {
-	conn, err := u.Upgrader.NewConnection(resp)
-
-	go func() {
-		<-u.Context.Done()
-		conn.Close()
-	}()
-
-	return conn, err
-}
-
-// From remotecommand.NewSPDYExecutor
-func (e *Environment) executor(ctx context.Context, url *url.URL) (remotecommand.Executor, error) {
-	wrapper, upgradeRoundTripper, err := spdy.RoundTripperFor(e.config)
-	if err != nil {
-		return nil, err
-	}
-
-	wrappedUpgrader := ContextUpgrader{
-		Upgrader: upgradeRoundTripper,
-		Context:  ctx,
-	}
-
-	return remotecommand.NewSPDYExecutorForTransports(wrapper, wrappedUpgrader, "POST", url)
-}
-
-func (e *Environment) CachedUsage() int64 {
-	return atomic.LoadInt64(&e.diskUsed)
-}
-
-func (e *Environment) DiskUsage(allowStaleValue bool) (int64, error) {
-	req := e.client.CoreV1().RESTClient().
-		Get().
-		Namespace(config.Get().Cluster.Namespace).
-		Resource("pods").
-		Name(e.Id).
-		SubResource("exec").
-		VersionedParams(&v1.PodExecOptions{
-			Container: "process",
-			Command:   []string{"bash", "-c", "du -bs /home/container | awk '{print $1}'"},
-			Stdin:     false,
-			Stdout:    true,
-			Stderr:    true,
-			TTY:       false,
-		}, scheme.ParameterCodec)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	executor, err := e.executor(ctx, req.URL())
-	if err != nil {
-		return 0, err
-	}
-
-	var stdout, stderr bytes.Buffer
-
-	defer cancel()
-	err = executor.Stream(remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
+func (e *Environment) GetServiceDetails() []v1.Service {
+	list, err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).List(context.TODO(), metav1.ListOptions{
+		LabelSelector: "uuid=" + e.Id,
 	})
 	if err != nil {
-		return 0, err
+		return nil
 	}
 
-	s := strings.TrimSuffix(stdout.String(), "\n")
-	i, _ := strconv.Atoi(s)
-
-	return int64(i), err
-}
-
-func (e *Environment) HasSpaceAvailable(allowStaleValue bool) bool {
-	size, err := e.DiskUsage(allowStaleValue)
-	if err != nil {
-		fmt.Println("Error: ", err)
-	}
-
-	atomic.StoreInt64(&e.diskUsed, size)
-
-	return size <= (e.Config().Limits().DiskSpace * 1_000_000)
-}
-
-// The same concept as HasSpaceAvailable however this will return an error if there is
-// no space, rather than a boolean value.
-func (e *Environment) HasSpaceErr(allowStaleValue bool) error {
-	if !e.HasSpaceAvailable(allowStaleValue) {
-		return fmt.Errorf("No space !!")
-	}
-	return nil
-}
-
-func (e *Environment) ReturnJSON() ([]byte, error) {
-	out := map[string]interface{}{}
-
-	svc, err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).Get(context.TODO(), "svc-"+e.Id, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-
-	pod, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.TODO(), e.Id, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-
-	out["svc"] = svc
-	out["pod"] = pod
-
-	json, _ := json.Marshal(out)
-
-	return json, nil
+	return list.Items
 }
 
 func (e *Environment) log() *log.Entry {
@@ -227,7 +108,7 @@ func (e *Environment) Type() string {
 // SetStream sets the current stream value from the Docker client. If a nil
 // value is provided we assume that the stream is no longer operational and the
 // instance is effectively offline.
-func (e *Environment) SetStream(s *types.HijackedResponse) {
+func (e *Environment) SetStream(s remotecommand.Executor) {
 	e.mu.Lock()
 	e.stream = s
 	e.mu.Unlock()
@@ -290,7 +171,7 @@ func (e *Environment) ExitState() (uint32, bool, error) {
 	c, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.Background(), e.Id, metav1.GetOptions{})
 	if err != nil {
 		// I'm not entirely sure how this can happen to be honest. I tried deleting a
-		// container _while_ a server was running and wings gracefully saw the crash and
+		// container _while_ a server was running and kuber gracefully saw the crash and
 		// created a new container for it.
 		//
 		// However, someone reported an error in Discord about this scenario happening,
@@ -304,7 +185,7 @@ func (e *Environment) ExitState() (uint32, bool, error) {
 		return 0, false, err
 	}
 
-	if c.Status.Phase != v1.PodRunning && len(c.Status.ContainerStatuses) != 0 {
+	if len(c.Status.ContainerStatuses) != 0 {
 		if c.Status.ContainerStatuses[0].State.Terminated != nil {
 			// OOMKilled
 			if c.Status.ContainerStatuses[0].State.Terminated.ExitCode == 137 {

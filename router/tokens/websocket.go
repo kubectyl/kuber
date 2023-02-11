@@ -9,13 +9,13 @@ import (
 	"github.com/gbrlsnchs/jwt/v3"
 )
 
-// The time at which Wings was booted. No JWT's created before this time are allowed to
+// The time at which Kuber was booted. No JWT's created before this time are allowed to
 // connect to the socket since they may have been marked as denied already and therefore
 // could be invalid at this point.
 //
-// By doing this we make it so that a user who gets disconnected from Wings due to a Wings
+// By doing this we make it so that a user who gets disconnected from Kuber due to a Kuber
 // reboot just needs to request a new token as if their old token had expired naturally.
-var wingsBootTime = time.Now()
+var kuberBootTime = time.Now()
 
 // A map that contains any JTI's that have been denied by the Panel and the time at which
 // they were marked as denied. Therefore any JWT with the same JTI and an IssuedTime that
@@ -62,7 +62,7 @@ func (p *WebsocketPayload) GetServerUuid() string {
 }
 
 // Check if the JWT has been marked as denied by the instance due to either being issued
-// before Wings was booted, or because we have denied all tokens with the same JTI
+// before Kuber was booted, or because we have denied all tokens with the same JTI
 // occurring before a set time.
 func (p *WebsocketPayload) Denylisted() bool {
 	// If there is no IssuedAt present for the token, we cannot validate the token so
@@ -71,9 +71,9 @@ func (p *WebsocketPayload) Denylisted() bool {
 		return true
 	}
 
-	// If the time that the token was issued is before the time at which Wings was booted
+	// If the time that the token was issued is before the time at which Kuber was booted
 	// then the token is invalid for our purposes, even if the token "has permission".
-	if p.IssuedAt.Time.Before(wingsBootTime) {
+	if p.IssuedAt.Time.Before(kuberBootTime) {
 		return true
 	}
 

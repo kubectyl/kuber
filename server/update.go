@@ -1,8 +1,6 @@
 package server
 
 import (
-	"time"
-
 	docker "github.com/kubectyl/kuber/environment/kubernetes"
 
 	"github.com/kubectyl/kuber/environment"
@@ -43,27 +41,4 @@ func (s *Server) SyncWithEnvironment() {
 	//
 	// @see https://github.com/pterodactyl/panel/issues/2255
 	s.Environment.Config().SetEnvironmentVariables(s.GetEnvironmentVariables())
-
-	if !s.IsSuspended() {
-		// Update the environment in place, allowing memory and CPU usage to be adjusted
-		// on the fly without the user needing to reboot (theoretically).
-		s.Log().Info("performing server limit modification on-the-fly")
-		if err := s.Environment.InSituUpdate(); err != nil {
-			// This is not a failure, the process is still running fine and will fix itself on the
-			// next boot, or fail out entirely in a more logical position.
-			s.Log().WithField("error", err).Warn("failed to perform on-the-fly update of the server environment")
-		}
-	} else {
-		// Checks if the server is now in a suspended state. If so and a server process is currently running it
-		// will be gracefully stopped (and terminated if it refuses to stop).
-		if s.Environment.State() != environment.ProcessOfflineState {
-			s.Log().Info("server suspended with running process state, terminating now")
-
-			go func(s *Server) {
-				if err := s.Environment.WaitForStop(s.Context(), time.Minute, true); err != nil {
-					s.Log().WithField("error", err).Warn("failed to terminate server environment after suspension")
-				}
-			}(s)
-		}
-	}
 }

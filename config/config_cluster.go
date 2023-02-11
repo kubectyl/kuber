@@ -3,17 +3,25 @@ package config
 import "sort"
 
 type ClusterConfiguration struct {
-	Namespace string `default:"default" yaml:"namespace"`
+	Namespace string `json:"namespace" default:"default" yaml:"namespace"`
 
-	Host string `yaml:"host"`
+	Host string `json:"host" yaml:"host"`
 
 	BearerToken string `json:"bearer_token" yaml:"bearer_token"`
 
-	ServiceType string `default:"nodeport" yaml:"service_type"`
+	DNSPolicy string `json:"dns_policy" default:"clusterfirst" yaml:"dns_policy"`
 
-	StorageClass string `default:"manual" yaml:"storage_class"`
+	ImagePullPolicy string `json:"image_pull_policy" default:"ifnotpresent" yaml:"image_pull_policy"`
 
-	Insecure bool `yaml:"insecure" default:"false"`
+	ServiceType string `json:"service_type" default:"nodeport" yaml:"service_type"`
+
+	MetalLBAddressPool string `json:"metallb_address_pool" yaml:"metallb_address_pool"`
+
+	MetalLBSharedIP bool `json:"metallb_shared_ip" default:"true" yaml:"metallb_shared_ip"`
+
+	StorageClass string `json:"storage_class" default:"manual" yaml:"storage_class"`
+
+	Insecure bool `json:"insecure" yaml:"insecure" default:"false"`
 
 	Network ClusterNetworkConfiguration `json:"network" yaml:"network"`
 
@@ -30,11 +38,11 @@ type ClusterConfiguration struct {
 	// software such as the JVM not staying below the maximum memory limit.
 	Overhead Overhead `json:"overhead" yaml:"overhead"`
 
-	// CertData string `yaml:"certdata"`
+	CertFile string `json:"cert_file" yaml:"cert_file"`
 
-	// KeyData string `yaml:"keydata"`
+	KeyFile string `json:"key_file" yaml:"key_file"`
 
-	// CAData string `yaml:"cadata"`
+	CAFile string `json:"ca_file" yaml:"ca_file"`
 }
 
 type ClusterNetworkConfiguration struct {

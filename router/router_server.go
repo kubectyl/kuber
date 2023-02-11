@@ -3,7 +3,6 @@ package router
 import (
 	"context"
 	"net/http"
-	"os"
 	"strconv"
 
 	"emperror.dev/errors"
@@ -188,7 +187,7 @@ func postServerReinstall(c *gin.Context) {
 	c.Status(http.StatusAccepted)
 }
 
-// Deletes a server from the wings daemon and dissociate its objects.
+// Deletes a server from the kuber daemon and dissociate its objects.
 func deleteServer(c *gin.Context) {
 	s := middleware.ExtractServer(c)
 
@@ -220,18 +219,6 @@ func deleteServer(c *gin.Context) {
 		middleware.CaptureAndAbort(c, err)
 		return
 	}
-
-	// Once the environment is terminated, remove the server files from the system. This is
-	// done in a separate process since failure is not the end of the world and can be
-	// manually cleaned up after the fact.
-	//
-	// In addition, servers with large amounts of files can take some time to finish deleting,
-	// so we don't want to block the HTTP call while waiting on this.
-	go func(p string) {
-		if err := os.RemoveAll(p); err != nil {
-			log.WithFields(log.Fields{"path": p, "error": err}).Warn("failed to remove server files during deletion process")
-		}
-	}(s.Filesystem().Path())
 
 	middleware.ExtractManager(c).Remove(func(server *server.Server) bool {
 		return server.ID() == s.ID()

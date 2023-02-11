@@ -78,7 +78,7 @@ func ScanReader(r io.Reader, callback func(line []byte)) error {
 			// then send that data over the socket before ending this loop.
 			//
 			// This ensures that we send as much data as possible, without allowing very
-			// long lines to grow the buffer size excessively and potentially DOS the Wings
+			// long lines to grow the buffer size excessively and potentially DOS the Kuber
 			// instance. If the line is not too long, just store the whole value into the
 			// buffer. This is kind of a re-implementation of the bufio.Scanner.Scan() logic
 			// without triggering an error when you exceed this buffer size.

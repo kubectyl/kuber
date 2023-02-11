@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,7 +17,7 @@ import (
 
 	"github.com/kubectyl/kuber/config"
 	"github.com/kubectyl/kuber/environment"
-	docker "github.com/kubectyl/kuber/environment/kubernetes"
+	"github.com/kubectyl/kuber/environment/kubernetes"
 	"github.com/kubectyl/kuber/remote"
 	"github.com/kubectyl/kuber/server/filesystem"
 )
@@ -195,7 +196,8 @@ func (m *Manager) InitServer(data remote.ServerConfigurationResponse) (*Server, 
 		return nil, errors.WithStackIf(err)
 	}
 
-	s.fs = filesystem.New(filepath.Join(config.Get().System.Data, s.ID()), s.DiskSpace(), s.Config().Egg.FileDenylist)
+	// TODO: initialize the filesystem here so that we don't receive panic later
+	s.fs = filesystem.New(filepath.Join(config.Get().System.Data, s.ID()), s.DiskSpace(), s.Config().Egg.FileDenylist, "")
 
 	// Right now we only support a Docker based environment, so I'm going to hard code
 	// this logic in. When we're ready to support other environment we'll need to make
@@ -208,19 +210,35 @@ func (m *Manager) InitServer(data remote.ServerConfigurationResponse) (*Server, 
 	}
 
 	envCfg := environment.NewConfiguration(settings, s.GetEnvironmentVariables())
-	meta := docker.Metadata{
+	meta := kubernetes.Metadata{
 		Image: s.Config().Container.Image,
+		Stop:  s.ProcessConfiguration().Stop,
 	}
 
-	if env, err := docker.New(s.ID(), &meta, envCfg); err != nil {
+	if env, err := kubernetes.New(s.ID(), &meta, envCfg); err != nil {
 		return nil, err
 	} else {
 		s.Environment = env
 		s.StartEventListeners()
 	}
 
+	// TODO: this function looks like shit, but it works
+	services := s.Environment.GetServiceDetails()
+	if len(services) > 0 {
+		name := fmt.Sprintf("kuber-%s-tcp", s.ID())
+		for _, svc := range services {
+			if svc.Name != name {
+				continue
+			}
+
+			if svc.Spec.Type == "LoadBalancer" && len(svc.Status.LoadBalancer.Ingress) != 0 {
+				s.fs = filesystem.New(filepath.Join(config.Get().System.Data, s.ID()), s.DiskSpace(), s.Config().Egg.FileDenylist, svc.Status.LoadBalancer.Ingress[0].IP)
+			}
+		}
+	}
+
 	// If the server's data directory exists, force disk usage calculation.
-	if _, err := os.Stat(s.Filesystem().Path()); err == nil {
+	if _, err := s.Filesystem().Stat(s.Filesystem().Path()); err == nil {
 		s.Filesystem().HasSpaceAvailable(true)
 	}
 

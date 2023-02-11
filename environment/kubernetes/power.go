@@ -26,7 +26,7 @@ import (
 // an egg available for server processes.
 //
 // This process will also confirm that the server environment exists and is in
-// a bootable state. This ensures that unexpected container deletion while Wings
+// a bootable state. This ensures that unexpected container deletion while Kuber
 // is running does not result in the server becoming un-bootable.
 func (e *Environment) OnBeforeStart(ctx context.Context) error {
 	// Always destroy and re-create the server container to ensure that synced data from the Panel is used.
@@ -118,18 +118,10 @@ func (e *Environment) Start(ctx context.Context) error {
 
 				err := wait.PollInfinite(time.Second, conditionFunc)
 				if err != nil {
+					fmt.Println("Start Crash: ", err)
 					e.SetState(environment.ProcessOfflineState)
 				}
 			}()
-
-			if e.Config().Limits().DiskSpace <= 0 {
-				e.HasSpaceAvailable(true)
-			} else {
-				// s.PublishConsoleOutputFromDaemon("Checking server disk space usage, this could take a few seconds...")
-				if err := e.HasSpaceErr(false); err != nil {
-					return err
-				}
-			}
 
 			return e.Attach(ctx)
 		}
@@ -163,34 +155,30 @@ func (e *Environment) Start(ctx context.Context) error {
 	actx, cancel := context.WithTimeout(ctx, time.Second*30)
 	defer cancel()
 
-	conditionFunc := func() (bool, error) {
-		pod, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.TODO(), e.Id, metav1.GetOptions{})
+	conditionFunc := func(context.Context) (bool, error) {
+		pod, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(actx, e.Id, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
 
 		switch pod.Status.Phase {
+		case v1.PodPending:
+			e.SetState(environment.ProcessStartingState)
 		case v1.PodRunning:
 			return true, nil
 		case v1.PodFailed, v1.PodSucceeded:
 			return false, fmt.Errorf("pod ran to completion")
+		default:
+			return false, fmt.Errorf("unknown pod status")
 		}
 		return false, nil
 	}
 
-	err := wait.Poll(time.Second, time.Second*30, conditionFunc)
+	err := wait.PollInfiniteWithContext(actx, time.Second, conditionFunc)
 	if err != nil {
+		fmt.Println("Start2 Crash: ", err)
 		e.SetState(environment.ProcessOfflineState)
 		return nil
-	}
-
-	if e.Config().Limits().DiskSpace <= 0 {
-		e.HasSpaceAvailable(true)
-	} else {
-		// s.PublishConsoleOutputFromDaemon("Checking server disk space usage, this could take a few seconds...")
-		if err := e.HasSpaceErr(false); err != nil {
-			return err
-		}
 	}
 
 	// You must attach to the instance _before_ you start the container. If you do this
@@ -251,7 +239,7 @@ func (e *Environment) Stop(ctx context.Context) error {
 
 	// Only attempt to send the stop command to the instance if we are actually attached to
 	// the instance. If we are not for some reason, just send the container stop event.
-	if e.IsAttached() && s.Type == remote.ProcessStopCommand {
+	if !e.IsAttached() && s.Type == remote.ProcessStopCommand {
 		return e.SendCommand(s.Value)
 	}
 
@@ -262,14 +250,14 @@ func (e *Environment) Stop(ctx context.Context) error {
 	// rather than forcefully terminating it, this value MUST be at least 1
 	// second, otherwise it will be ignored.
 	if err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ctx, e.Id, metav1.DeleteOptions{}); err != nil {
-		// If the container does not exist just mark the process as stopped and return without
+		// If the pod does not exist just mark the process as stopped and return without
 		// an error.
 		if apierrors.IsNotFound(err) {
 			e.SetStream(nil)
 			e.SetState(environment.ProcessOfflineState)
 			return nil
 		}
-		return errors.Wrap(err, "environment/docker: cannot stop container")
+		return errors.Wrap(err, "environment/kubernetes: cannot stop pod")
 	}
 
 	return nil

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"path"
 	"strconv"
@@ -18,11 +19,12 @@ import (
 	"github.com/docker/docker/pkg/parsers/kernel"
 	"github.com/docker/docker/pkg/parsers/operatingsystem"
 	"github.com/goccy/go-json"
-	"github.com/spf13/cobra"
-
 	"github.com/kubectyl/kuber/config"
 	"github.com/kubectyl/kuber/loggers/cli"
 	"github.com/kubectyl/kuber/system"
+	"github.com/spf13/cobra"
+
+	"github.com/olekukonko/tablewriter"
 )
 
 const (
@@ -41,7 +43,7 @@ var diagnosticsArgs struct {
 func newDiagnosticsCommand() *cobra.Command {
 	command := &cobra.Command{
 		Use:   "diagnostics",
-		Short: "Collect and report information about this Wings instance to assist in debugging.",
+		Short: "Collect and report information about this Kuber instance to assist in debugging.",
 		PreRun: func(cmd *cobra.Command, args []string) {
 			initConfig()
 			log.SetHandler(cli.Default)
@@ -57,7 +59,7 @@ func newDiagnosticsCommand() *cobra.Command {
 
 // diagnosticsCmdRun collects diagnostics about kuber, its configuration and the node.
 // We collect:
-// - wings and docker versions
+// - kuber and docker versions
 // - relevant parts of daemon configuration
 // - the docker debug output
 // - running docker containers
@@ -88,67 +90,40 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 		panic(err)
 	}
 
-	// dockerVersion, dockerInfo, dockerErr := getDockerInfo()
-
 	output := &strings.Builder{}
-	fmt.Fprintln(output, "Pterodactyl Wings - Diagnostics Report")
-	printHeader(output, "Versions")
-	fmt.Fprintln(output, "               Wings:", system.Version)
-	// if dockerErr == nil {
-	// 	fmt.Fprintln(output, "              Docker:", dockerVersion.Version)
-	// }
-	if v, err := kernel.GetKernelVersion(); err == nil {
-		fmt.Fprintln(output, "              Kernel:", v)
-	}
-	if os, err := operatingsystem.GetOperatingSystem(); err == nil {
-		fmt.Fprintln(output, "                  OS:", os)
-	}
+	fmt.Fprintln(output, "Kubectyl Kuber - Diagnostics Report")
 
-	printHeader(output, "Wings Configuration")
-	if err := config.FromFile(config.DefaultLocation); err != nil {
-	}
+	v, _ := kernel.GetKernelVersion()
+	osv, _ := operatingsystem.GetOperatingSystem()
+
 	cfg := config.Get()
-	fmt.Fprintln(output, "      Panel Location:", redact(cfg.PanelLocation))
-	fmt.Fprintln(output, "")
-	fmt.Fprintln(output, "  Internal Webserver:", redact(cfg.Api.Host), ":", cfg.Api.Port)
-	fmt.Fprintln(output, "         SSL Enabled:", cfg.Api.Ssl.Enabled)
-	fmt.Fprintln(output, "     SSL Certificate:", redact(cfg.Api.Ssl.CertificateFile))
-	fmt.Fprintln(output, "             SSL Key:", redact(cfg.Api.Ssl.KeyFile))
-	fmt.Fprintln(output, "")
-	fmt.Fprintln(output, "      Root Directory:", cfg.System.RootDirectory)
-	fmt.Fprintln(output, "      Logs Directory:", cfg.System.LogDirectory)
-	fmt.Fprintln(output, "      Data Directory:", cfg.System.Data)
-	fmt.Fprintln(output, "   Archive Directory:", cfg.System.ArchiveDirectory)
-	fmt.Fprintln(output, "    Backup Directory:", cfg.System.BackupDirectory)
-	fmt.Fprintln(output, "")
-	fmt.Fprintln(output, "            Username:", cfg.System.Username)
-	fmt.Fprintln(output, "         Server Time:", time.Now().Format(time.RFC1123Z))
-	fmt.Fprintln(output, "          Debug Mode:", cfg.Debug)
+	data := [][]string{
+		{"Kuber", system.Version},
+		{"Kernel", v.String()},
+		{"OS", osv},
 
-	// printHeader(output, "Docker: Info")
-	// if dockerErr == nil {
-	// 	fmt.Fprintln(output, "Server Version:", dockerInfo.ServerVersion)
-	// 	fmt.Fprintln(output, "Storage Driver:", dockerInfo.Driver)
-	// 	if dockerInfo.DriverStatus != nil {
-	// 		for _, pair := range dockerInfo.DriverStatus {
-	// 			fmt.Fprintf(output, "  %s: %s\n", pair[0], pair[1])
-	// 		}
-	// 	}
-	// 	if dockerInfo.SystemStatus != nil {
-	// 		for _, pair := range dockerInfo.SystemStatus {
-	// 			fmt.Fprintf(output, " %s: %s\n", pair[0], pair[1])
-	// 		}
-	// 	}
-	// 	fmt.Fprintln(output, "LoggingDriver:", dockerInfo.LoggingDriver)
-	// 	fmt.Fprintln(output, " CgroupDriver:", dockerInfo.CgroupDriver)
-	// 	if len(dockerInfo.Warnings) > 0 {
-	// 		for _, w := range dockerInfo.Warnings {
-	// 			fmt.Fprintln(output, w)
-	// 		}
-	// 	}
-	// } else {
-	// 	fmt.Fprintln(output, dockerErr.Error())
-	// }
+		{"Panel Location", redact(cfg.PanelLocation)},
+		{"Internal Webserver", fmt.Sprintf("%s:%d", redact(cfg.Api.Host), cfg.Api.Port)},
+		{"SSL Enabled", fmt.Sprintf("%t", cfg.Api.Ssl.Enabled)},
+		{"SSL Certificate", redact(cfg.Api.Ssl.CertificateFile)},
+		{"SSL Key", redact(cfg.Api.Ssl.KeyFile)},
+
+		{"Root Directory", cfg.System.RootDirectory},
+		{"Logs Directory", cfg.System.LogDirectory},
+		{"Data Directory", cfg.System.Data},
+		{"Archive Directory", cfg.System.ArchiveDirectory},
+		{"Backup Directory", cfg.System.BackupDirectory},
+
+		{"Username", cfg.System.Username},
+		{"Server Time", time.Now().Format(time.RFC1123Z)},
+		{"Debug Mode", fmt.Sprintf("%t", cfg.Debug)},
+	}
+
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"Variable", "Value"})
+	table.SetRowLine(true)
+	table.AppendBulk(data)
+	table.Render()
 
 	printHeader(output, "Docker: Running Containers")
 	c := exec.Command("docker", "ps")
@@ -158,11 +133,11 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 		fmt.Fprint(output, "Couldn't list containers: ", err)
 	}
 
-	printHeader(output, "Latest Wings Logs")
+	printHeader(output, "Latest Kuber Logs")
 	if diagnosticsArgs.IncludeLogs {
-		p := "/var/log/pterodactyl/wings.log"
+		p := "/var/log/kubectyl/kuber.log"
 		if cfg != nil {
-			p = path.Join(cfg.System.LogDirectory, "wings.log")
+			p = path.Join(cfg.System.LogDirectory, "kuber.log")
 		}
 		if c, err := exec.Command("tail", "-n", strconv.Itoa(diagnosticsArgs.LogLines), p).Output(); err != nil {
 			fmt.Fprintln(output, "No logs found or an error occurred.")
@@ -187,16 +162,16 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 	fmt.Println(output.String())
 	fmt.Print("---------------   end of report    ---------------\n\n")
 
-	upload := !diagnosticsArgs.ReviewBeforeUpload
-	if !upload {
-		survey.AskOne(&survey.Confirm{Message: "Upload to " + diagnosticsArgs.HastebinURL + "?", Default: false}, &upload)
-	}
-	if upload {
-		u, err := uploadToHastebin(diagnosticsArgs.HastebinURL, output.String())
-		if err == nil {
-			fmt.Println("Your report is available here: ", u)
-		}
-	}
+	// upload := !diagnosticsArgs.ReviewBeforeUpload
+	// if !upload {
+	// 	survey.AskOne(&survey.Confirm{Message: "Upload to " + diagnosticsArgs.HastebinURL + "?", Default: false}, &upload)
+	// }
+	// if upload {
+	// 	u, err := uploadToHastebin(diagnosticsArgs.HastebinURL, output.String())
+	// 	if err == nil {
+	// 		fmt.Println("Your report is available here: ", u)
+	// 	}
+	// }
 }
 
 // func getDockerInfo() (types.Version, types.Info, error) {

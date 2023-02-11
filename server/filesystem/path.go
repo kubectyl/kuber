@@ -38,6 +38,8 @@ func (fs *Filesystem) SafePath(p string) (string, error) {
 	// Start with a cleaned up path before checking the more complex bits.
 	r := fs.unsafeFilePath(p)
 
+	return r, nil
+
 	// At the same time, evaluate the symlink status and determine where this file or folder
 	// is truly pointing to.
 	ep, err := filepath.EvalSymlinks(r)
@@ -99,6 +101,7 @@ func (fs *Filesystem) unsafeFilePath(p string) string {
 	//
 	// This will also trim the existing root path off the beginning of the path passed to
 	// the function since that can get a bit messy.
+	// return filepath.Clean(filepath.Join("/opt/local-path-provisioner/pvc-10bf499a-bc4f-459c-803d-3a76074991b7_default_14793919-f70a-4f36-a7e5-102d7490ac51-pvc", strings.TrimPrefix(p, fs.Path())))
 	return filepath.Clean(filepath.Join(fs.Path(), strings.TrimPrefix(p, fs.Path())))
 }
 

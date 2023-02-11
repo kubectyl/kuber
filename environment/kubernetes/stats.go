@@ -76,7 +76,7 @@ func (e *Environment) pollResources(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	executor, err := e.executor(ctx, req.URL())
+	exec, err := remotecommand.NewSPDYExecutor(e.config, "POST", req.URL())
 	if err != nil {
 		return err
 	}
@@ -84,7 +84,7 @@ func (e *Environment) pollResources(ctx context.Context) error {
 	r, w, _ := os.Pipe()
 
 	go func() {
-		err = executor.Stream(remotecommand.StreamOptions{
+		err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
 			Stdout: w,
 		})
 	}()
@@ -106,8 +106,18 @@ func (e *Environment) pollResources(ctx context.Context) error {
 		//
 		// @see https://stackoverflow.com/questions/26126235/panic-runtime-error-index-out-of-range-in-go
 		if len(podMetrics.Containers) != 0 {
-			cpuQuantity := podMetrics.Containers[0].Usage.Cpu().AsDec().String()
-			memQuantity, ok := podMetrics.Containers[0].Usage.Memory().AsInt64()
+			cpuQuantity := ""
+			memQuantity, ok := int64(0), false
+
+			for i, c := range podMetrics.Containers {
+				if c.Name == "process" {
+					cpuQuantity = podMetrics.Containers[i].Usage.Cpu().AsDec().String()
+					memQuantity, ok = podMetrics.Containers[i].Usage.Memory().AsInt64()
+				} else {
+					continue
+				}
+			}
+
 			if !ok {
 				break
 			}
@@ -148,6 +158,22 @@ func (e *Environment) pollResources(ctx context.Context) error {
 			st := environment.Stats{
 				Uptime: uptime,
 			}
+
+			b, err := rbuf.ReadBytes('\n')
+			if err == io.EOF {
+				continue
+			}
+
+			words := strings.Fields(string(bytes.TrimSpace(b)))
+
+			if len(words) != 0 {
+				rxBytes, _ := strconv.ParseUint(words[0], 10, 64)
+				txBytes, _ := strconv.ParseUint(words[1], 10, 64)
+
+				st.Network.RxBytes += rxBytes
+				st.Network.TxBytes += txBytes
+			}
+
 			e.Events().Publish(environment.ResourceEvent, st)
 		}
 
