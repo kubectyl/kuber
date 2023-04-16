@@ -2,13 +2,18 @@ package environment
 
 import (
 	"sync"
+
+	"github.com/kubectyl/kuber/parser"
 )
 
 type Settings struct {
-	Mounts      []Mount
-	Allocations Allocations
-	Limits      Limits
-	Labels      map[string]string
+	Mounts             []Mount
+	Ports              Ports
+	Allocations        Allocations
+	Limits             Limits
+	Labels             map[string]string
+	ConfigurationFiles []parser.ConfigurationFile
+	NodeSelectors      map[string]string
 }
 
 // Defines the actual configuration struct for the environment with all of the settings
@@ -53,6 +58,14 @@ func (c *Configuration) Limits() Limits {
 	return c.settings.Limits
 }
 
+// Returns the ports associated with this environment.
+func (c *Configuration) Ports() Ports {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.settings.Ports
+}
+
 // Returns the allocations associated with this environment.
 func (c *Configuration) Allocations() Allocations {
 	c.mu.RLock()
@@ -83,4 +96,20 @@ func (c *Configuration) EnvironmentVariables() []string {
 	defer c.mu.RUnlock()
 
 	return c.environmentVariables
+}
+
+// Returns the configuration files associated with this instance.
+func (c *Configuration) ConfigurationFiles() []parser.ConfigurationFile {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.settings.ConfigurationFiles
+}
+
+// Returns the node selectors associated with this instance.
+func (c *Configuration) NodeSelectors() map[string]string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.settings.NodeSelectors
 }

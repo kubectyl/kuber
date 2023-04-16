@@ -132,6 +132,35 @@ func (s *Server) HandlePowerAction(action PowerAction, waitSeconds ...int) error
 			return err
 		}
 
+		services := s.Environment.GetServiceDetails()
+		if len(services) > 0 {
+			name := fmt.Sprintf("kuber-%s-tcp", s.ID())
+			for _, svc := range services {
+				if svc.Name != name {
+					continue
+				}
+
+				ip := svc.Spec.ClusterIP
+				port := config.Get().System.Sftp.Port
+
+				switch svc.Spec.Type {
+				case "LoadBalancer":
+					if len(svc.Status.LoadBalancer.Ingress) > 0 {
+						ip = svc.Status.LoadBalancer.Ingress[0].IP
+					}
+					if len(svc.Spec.Ports) > 0 {
+						port = int(svc.Spec.Ports[0].Port)
+					}
+				case "NodePort":
+					if len(svc.Spec.Ports) > 0 {
+						port = int(svc.Spec.Ports[0].NodePort)
+					}
+				}
+
+				s.fs.SetManager(fmt.Sprintf("%s:%v", ip, port))
+			}
+		}
+
 		return s.Environment.Start(s.Context())
 	case PowerActionStop:
 		fallthrough
@@ -203,18 +232,20 @@ func (s *Server) onBeforeStart() error {
 	// we don't need to actively do anything about it at this point, worse comes to worst the
 	// server starts in a weird state and the user can manually adjust.
 	s.PublishConsoleOutputFromDaemon("Updating process configuration files...")
-	s.Log().Debug("updating server configuration files...")
-	s.UpdateConfigurationFiles()
-	s.Log().Debug("updated server configuration files")
+	// s.Log().Debug("updating server configuration files...")
+	// s.UpdateConfigurationFiles()
+	// s.Log().Debug("updated server configuration files")
 
-	if config.Get().System.CheckPermissionsOnBoot {
-		s.PublishConsoleOutputFromDaemon("Ensuring file permissions are set correctly, this could take a few seconds...")
-		// Ensure all the server file permissions are set correctly before booting the process.
-		s.Log().Debug("chowning server root directory...")
-		// if err := s.Filesystem().Chown("/"); err != nil {
-		// 	return errors.WithMessage(err, "failed to chown root server directory during pre-boot process")
-		// }
-	}
+	// if config.Get().System.CheckPermissionsOnBoot {
+	// s.PublishConsoleOutputFromDaemon("Ensuring file permissions are set correctly, this could take a few seconds...")
+
+	// Ensure all the server file permissions are set correctly before booting the process.
+
+	// s.Log().Debug("chowning server root directory...")
+	// if err := s.Filesystem().Chown("/"); err != nil {
+	// 	return errors.WithMessage(err, "failed to chown root server directory during pre-boot process")
+	// }
+	// }
 
 	s.Log().Info("completed server preflight, starting boot process...")
 	return nil

@@ -159,8 +159,8 @@ func (c *client) GetBackupRemoteUploadURLs(ctx context.Context, backup string, s
 	return data, nil
 }
 
-func (c *client) SetBackupStatus(ctx context.Context, backup string, data BackupRequest) error {
-	resp, err := c.Post(ctx, fmt.Sprintf("/backups/%s", backup), data)
+func (c *client) SetSnapshotStatus(ctx context.Context, backup string, data BackupRequest) error {
+	resp, err := c.Post(ctx, fmt.Sprintf("/snapshots/%s", backup), data)
 	if err != nil {
 		return err
 	}
@@ -171,8 +171,8 @@ func (c *client) SetBackupStatus(ctx context.Context, backup string, data Backup
 // SendRestorationStatus triggers a request to the Panel to notify it that a
 // restoration has been completed and the server should be marked as being
 // activated again.
-func (c *client) SendRestorationStatus(ctx context.Context, backup string, successful bool) error {
-	resp, err := c.Post(ctx, fmt.Sprintf("/backups/%s/restore", backup), d{"successful": successful})
+func (c *client) SendRestorationStatus(ctx context.Context, snapshot string, successful bool) error {
+	resp, err := c.Post(ctx, fmt.Sprintf("/snapshots/%s/restore", snapshot), d{"successful": successful})
 	if err != nil {
 		return err
 	}

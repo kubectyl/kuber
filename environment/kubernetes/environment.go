@@ -98,7 +98,7 @@ func (e *Environment) GetServiceDetails() []v1.Service {
 }
 
 func (e *Environment) log() *log.Entry {
-	return log.WithField("environment", e.Type()).WithField("container_id", e.Id)
+	return log.WithField("environment", e.Type()).WithField("pod_name", e.Id)
 }
 
 func (e *Environment) Type() string {
@@ -145,22 +145,23 @@ func (e *Environment) Exists() (bool, error) {
 	return true, nil
 }
 
-// IsRunning determines if the server's docker container is currently running.
+// IsRunning determines if the server's process container is currently running.
 // If there is no container present, an error will be raised (since this
 // shouldn't be a case that ever happens under correctly developed
 // circumstances).
-//
-// You can confirm if the instance wasn't found by using client.IsErrNotFound
-// from the Docker API.
-//
-// @see docker/client/errors.go
 func (e *Environment) IsRunning(ctx context.Context) (bool, error) {
-	c, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(ctx, e.Id, metav1.GetOptions{})
+	p, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(ctx, e.Id, metav1.GetOptions{})
 	if err != nil {
 		return false, err
 	}
-	if c.Status.Phase == v1.PodRunning {
-		return true, nil
+	for _, container := range p.Spec.Containers {
+		if container.Name == "process" && p.Status.ContainerStatuses != nil {
+			for _, status := range p.Status.ContainerStatuses {
+				if status.Name == container.Name && status.State.Running != nil {
+					return true, nil
+				}
+			}
+		}
 	}
 	return false, nil
 }

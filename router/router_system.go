@@ -3,7 +3,6 @@ package router
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,9 +15,9 @@ import (
 	"github.com/apex/log"
 	"github.com/gin-gonic/gin"
 	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/rest"
 
 	"github.com/kubectyl/kuber/config"
+	"github.com/kubectyl/kuber/environment"
 	"github.com/kubectyl/kuber/router/middleware"
 	"github.com/kubectyl/kuber/server"
 	"github.com/kubectyl/kuber/server/installer"
@@ -38,15 +37,21 @@ func getSystemInformation(c *gin.Context) {
 		return
 	}
 
-	cfg := config.Get().Cluster
+	// cfg := config.Get().Cluster
 
-	config := &rest.Config{
-		Host:        cfg.Host,
-		BearerToken: cfg.BearerToken,
-		TLSClientConfig: rest.TLSClientConfig{
-			Insecure: cfg.Insecure,
-		},
+	config, _, err := environment.Cluster()
+	if err != nil {
+		middleware.CaptureAndAbort(c, err)
+		return
 	}
+
+	// config := &rest.Config{
+	// 	Host:        cfg.Host,
+	// 	BearerToken: cfg.BearerToken,
+	// 	TLSClientConfig: rest.TLSClientConfig{
+	// 		Insecure: cfg.Insecure,
+	// 	},
+	// }
 
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
 	if err != nil {
@@ -56,7 +61,6 @@ func getSystemInformation(c *gin.Context) {
 
 	information, err := discoveryClient.ServerVersion()
 	if err != nil {
-		fmt.Println("discoveryClient error")
 		middleware.CaptureAndAbort(c, err)
 		return
 	}
@@ -144,6 +148,9 @@ func postCreateServer(c *gin.Context) {
 				}
 			}
 		} else {
+			if err := i.Server().Environment.CreateSFTP(); err != nil {
+				log.WithFields(log.Fields{"server_id": i.Server().ID(), "error": err}).Error("encountered error processing server SFTP process")
+			}
 			log.WithField("server_id", i.Server().ID()).Debug("skipping automatic start after successful server installation")
 		}
 	}(install)

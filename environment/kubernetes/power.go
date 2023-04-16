@@ -23,7 +23,7 @@ import (
 // OnBeforeStart run before the container starts and get the process
 // configuration from the Panel. This is important since we use this to check
 // configuration files as well as ensure we always have the latest version of
-// an egg available for server processes.
+// a rocket available for server processes.
 //
 // This process will also confirm that the server environment exists and is in
 // a bootable state. This ensures that unexpected container deletion while Kuber
@@ -39,7 +39,7 @@ func (e *Environment) OnBeforeStart(ctx context.Context) error {
 		}
 	}
 
-	conditionFunc := func() (bool, error) {
+	err := wait.Poll(time.Second, time.Second*10, func() (bool, error) {
 		_, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.TODO(), e.Id, metav1.GetOptions{})
 		if err != nil {
 			if apierrors.IsNotFound(err) {
@@ -48,9 +48,7 @@ func (e *Environment) OnBeforeStart(ctx context.Context) error {
 			return true, err
 		}
 		return false, nil
-	}
-
-	err := wait.Poll(time.Second, time.Second*10, conditionFunc)
+	})
 	if err != nil {
 		return err
 	}
@@ -92,49 +90,28 @@ func (e *Environment) Start(ctx context.Context) error {
 		// Do nothing if the container is not found, we just don't want to continue
 		// to the next block of code here. This check was inlined here to guard against
 		// a nil-pointer when checking c.State below.
-		//
-		// @see https://github.com/pterodactyl/panel/issues/2000
 		if !apierrors.IsNotFound(err) {
-			return errors.WrapIf(err, "environment/docker: failed to inspect container")
+			return errors.WrapIf(err, "environment/kubernetes: failed to inspect pod")
 		}
 	} else {
 		// If the server is running update our internal state and continue on with the attach.
-		if c.Status.Phase == v1.PodRunning {
+		if running, _ := e.IsRunning(ctx); running && c.Status.Phase == v1.PodRunning {
 			e.SetState(environment.ProcessRunningState)
 
 			go func() {
-				conditionFunc := func() (bool, error) {
-					pod, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.TODO(), e.Id, metav1.GetOptions{})
-					if err != nil {
+				err := wait.PollInfinite(time.Second, func() (bool, error) {
+					if running, err := e.IsRunning(ctx); !running {
 						return true, err
 					}
-
-					switch pod.Status.Phase {
-					case v1.PodFailed, v1.PodSucceeded:
-						return true, fmt.Errorf("pod ran to completion")
-					}
-					return false, nil
-				}
-
-				err := wait.PollInfinite(time.Second, conditionFunc)
+					return false, err
+				})
 				if err != nil {
-					fmt.Println("Start Crash: ", err)
 					e.SetState(environment.ProcessOfflineState)
 				}
 			}()
 
 			return e.Attach(ctx)
 		}
-
-		// Truncate the log file, so we don't end up outputting a bunch of useless log information
-		// to the websocket and whatnot. Check first that the path and file exist before trying
-		// to truncate them.
-
-		// if _, err := os.Stat(c.LogPath); err == nil {
-		// 	if err := os.Truncate(c.LogPath, 0); err != nil {
-		// 		return errors.Wrap(err, "environment/docker: failed to truncate instance logs")
-		// 	}
-		// }
 	}
 
 	e.SetState(environment.ProcessStartingState)
@@ -155,8 +132,8 @@ func (e *Environment) Start(ctx context.Context) error {
 	actx, cancel := context.WithTimeout(ctx, time.Second*30)
 	defer cancel()
 
-	conditionFunc := func(context.Context) (bool, error) {
-		pod, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(actx, e.Id, metav1.GetOptions{})
+	err := wait.PollInfinite(time.Second, func() (bool, error) {
+		pod, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.Background(), e.Id, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -172,11 +149,8 @@ func (e *Environment) Start(ctx context.Context) error {
 			return false, fmt.Errorf("unknown pod status")
 		}
 		return false, nil
-	}
-
-	err := wait.PollInfiniteWithContext(actx, time.Second, conditionFunc)
+	})
 	if err != nil {
-		fmt.Println("Start2 Crash: ", err)
 		e.SetState(environment.ProcessOfflineState)
 		return nil
 	}
@@ -214,7 +188,7 @@ func (e *Environment) Stop(ctx context.Context) error {
 	// may not work as expected).
 	if s.Type == "" || s.Type == remote.ProcessStopSignal {
 		if s.Type == "" {
-			log.WithField("container_id", e.Id).Warn("no stop configuration detected for environment, using termination procedure")
+			log.WithField("pod_name", e.Id).Warn("no stop configuration detected for environment, using termination procedure")
 		}
 
 		signal := os.Kill
@@ -239,8 +213,27 @@ func (e *Environment) Stop(ctx context.Context) error {
 
 	// Only attempt to send the stop command to the instance if we are actually attached to
 	// the instance. If we are not for some reason, just send the container stop event.
-	if !e.IsAttached() && s.Type == remote.ProcessStopCommand {
-		return e.SendCommand(s.Value)
+	if e.IsAttached() && s.Type == remote.ProcessStopCommand {
+		e.SendCommand(s.Value)
+
+		err := wait.PollUntilWithContext(ctx, time.Second, func(ctx context.Context) (done bool, err error) {
+			running, err := e.IsRunning(ctx)
+			if err != nil && !apierrors.IsNotFound(err) {
+				return false, err
+			}
+
+			if !running {
+				e.SetStream(nil)
+				e.SetState(environment.ProcessOfflineState)
+
+				return true, nil
+			}
+
+			return false, nil
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	// Allow the stop action to run for however long it takes, similar to executing a command
@@ -250,14 +243,20 @@ func (e *Environment) Stop(ctx context.Context) error {
 	// rather than forcefully terminating it, this value MUST be at least 1
 	// second, otherwise it will be ignored.
 	if err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ctx, e.Id, metav1.DeleteOptions{}); err != nil {
-		// If the pod does not exist just mark the process as stopped and return without
-		// an error.
+		// If the pod does not exist just mark the process as stopped and return without an error.
 		if apierrors.IsNotFound(err) {
 			e.SetStream(nil)
 			e.SetState(environment.ProcessOfflineState)
 			return nil
 		}
 		return errors.Wrap(err, "environment/kubernetes: cannot stop pod")
+	}
+
+	running, _ := e.IsRunning(ctx)
+
+	if !running {
+		e.SetStream(nil)
+		e.SetState(environment.ProcessOfflineState)
 	}
 
 	return nil
@@ -293,7 +292,7 @@ func (e *Environment) WaitForStop(ctx context.Context, duration time.Duration, t
 	}
 
 	// We pass through the timed context for this stop action so that if one of the
-	// internal docker calls fails to ever finish before we've exhausted the time limit
+	// internal kubernetes calls fails to ever finish before we've exhausted the time limit
 	// the resources get cleaned up, and the exection is stopped.
 	if err := e.Stop(tctx); err != nil {
 		if terminate && errors.Is(err, context.DeadlineExceeded) {
@@ -305,7 +304,7 @@ func (e *Environment) WaitForStop(ctx context.Context, duration time.Duration, t
 	// Block the return of this function until the container as been marked as no
 	// longer running. If this wait does not end by the time seconds have passed,
 	// attempt to terminate the container, or return an error.
-	conditionFunc := func(context.Context) (bool, error) {
+	err := wait.PollUntilWithContext(tctx, time.Second, func(context.Context) (bool, error) {
 		_, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(tctx, e.Id, metav1.GetOptions{})
 		if err != nil {
 			if apierrors.IsNotFound(err) {
@@ -314,14 +313,23 @@ func (e *Environment) WaitForStop(ctx context.Context, duration time.Duration, t
 			return false, nil
 		}
 		return false, nil
-	}
+		// running, err := e.IsRunning(tctx)
+		// running = !running
 
-	err := wait.PollUntilWithContext(tctx, time.Second, conditionFunc)
+		// return running, err
+	})
 	if terminate && err != nil {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			e.log().WithField("error", err).Warn("error while waiting for pod stop; terminating process")
 		}
 		return doTermination("wait")
+	}
+
+	if terminate && e.st.Load() == environment.ProcessOfflineState {
+		err = e.CreateSFTP()
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -343,7 +351,10 @@ func (e *Environment) Terminate(ctx context.Context, signal os.Signal) error {
 	e.SetState(environment.ProcessStoppingState)
 	var zero int64 = 0
 	policy := metav1.DeletePropagationForeground
-	if err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ctx, e.Id, metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &policy}); err != nil && !apierrors.IsNotFound(err) {
+	if err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ctx, e.Id, metav1.DeleteOptions{
+		GracePeriodSeconds: &zero,
+		PropagationPolicy:  &policy,
+	}); err != nil && !apierrors.IsNotFound(err) {
 		return errors.WithStack(err)
 	}
 	e.SetState(environment.ProcessOfflineState)

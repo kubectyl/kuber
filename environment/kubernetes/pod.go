@@ -3,16 +3,20 @@ package kubernetes
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"emperror.dev/errors"
 	"github.com/apex/log"
 	"github.com/docker/docker/api/types/mount"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
 
@@ -21,6 +25,7 @@ import (
 	"github.com/kubectyl/kuber/system"
 
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -109,7 +114,7 @@ func (e *Environment) Attach(ctx context.Context) error {
 			defer e.logCallbackMx.Unlock()
 			e.logCallback(v)
 		}); err != nil && err != io.EOF {
-			log.WithField("error", err).WithField("container_id", e.Id).Warn("error processing scanner line in console output")
+			log.WithField("error", err).WithField("pod_name", e.Id).Warn("error processing scanner line in console output")
 			return
 		}
 	}()
@@ -117,9 +122,30 @@ func (e *Environment) Attach(ctx context.Context) error {
 	return nil
 }
 
-func ptrPodFSGroupChangePolicy(p corev1.PodFSGroupChangePolicy) *corev1.PodFSGroupChangePolicy {
-	return &p
-}
+// func (e *Environment) InSituUpdate() error {
+// 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+// 	defer cancel()
+
+// if _, err := e.ContainerInspect(ctx); err != nil {
+// If the container doesn't exist for some reason there really isn't anything
+// we can do to fix that in this process (it doesn't make sense at least). In those
+// cases just return without doing anything since we still want to save the configuration
+// to the disk.
+//
+// We'll let a boot process make modifications to the container if needed at this point.
+// if apierrors.(err) {
+// 	return nil
+// }
+// return errors.Wrap(err, "environment/kubernetes: could not inspect container")
+// }
+
+// if _, err := e.client.ContainerUpdate(ctx, e.Id, container.UpdateConfig{
+// 	Resources: e.Configuration.Limits().AsContainerResources(),
+// }); err != nil {
+// 	return errors.Wrap(err, "environment/kubernetes: could not update pod")
+// }
+// return nil
+// }
 
 // Create creates a new container for the server using all the data that is
 // currently available for it. If the container already exists it will be
@@ -137,8 +163,10 @@ func (e *Environment) Create() error {
 	}
 
 	cfg := config.Get()
+	p := e.Configuration.Ports()
 	a := e.Configuration.Allocations()
 	evs := e.Configuration.EnvironmentVariables()
+	// cfs := e.Configuration.ConfigurationFiles()
 
 	// Merge user-provided labels with system labels
 	confLabels := e.Configuration.Labels()
@@ -153,27 +181,47 @@ func (e *Environment) Create() error {
 
 	resources := e.Configuration.Limits()
 
-	var dnspolicy corev1.DNSPolicy
-	switch cfg.Cluster.DNSPolicy {
-	case "clusterfirstwithhostnet":
-		dnspolicy = corev1.DNSClusterFirstWithHostNet
-	case "default":
-		dnspolicy = corev1.DNSDefault
-	case "none":
-		dnspolicy = corev1.DNSNone
-	default:
+	var cpuLimit, cpuRequest *resource.Quantity
+	if resources.CpuLimit != 0 {
+		cpuLimit = resource.NewMilliQuantity(10*resources.CpuLimit, resource.DecimalSI)
+		cpuRequest = resource.NewMilliQuantity(int64(float64(resources.CpuLimit)*1.25), resource.DecimalSI)
+	}
+	memoryLimit := resource.NewQuantity(resources.BoundedMemoryLimit(), resource.BinarySI)
+
+	dnsPolicies := map[string]corev1.DNSPolicy{
+		"clusterfirstwithhostnet": corev1.DNSClusterFirstWithHostNet,
+		"default":                 corev1.DNSDefault,
+		"none":                    corev1.DNSNone,
+		"clusterfirst":            corev1.DNSClusterFirst,
+	}
+
+	dnspolicy, ok := dnsPolicies[cfg.Cluster.DNSPolicy]
+	if !ok {
 		dnspolicy = corev1.DNSClusterFirst
 	}
 
-	var imagepullpolicy corev1.PullPolicy
-	switch cfg.Cluster.ImagePullPolicy {
-	case "always":
-		imagepullpolicy = corev1.PullAlways
-	case "never":
-		imagepullpolicy = corev1.PullNever
-	default:
+	imagePullPolicies := map[string]corev1.PullPolicy{
+		"always":       corev1.PullAlways,
+		"never":        corev1.PullNever,
+		"ifnotpresent": corev1.PullIfNotPresent,
+	}
+
+	imagepullpolicy, ok := imagePullPolicies[cfg.Cluster.ImagePullPolicy]
+	if !ok {
 		imagepullpolicy = corev1.PullIfNotPresent
 	}
+
+	getInt := func() int32 {
+		port := p.DefaultMapping.Port
+		if port == 0 {
+			port = a.DefaultMapping.Port
+		}
+		return int32(port)
+	}
+	port := getInt()
+
+	// Prevents high CPU usage of kubelet by preventing chown on the entire CSI
+	fsGroupChangePolicy := corev1.FSGroupChangeOnRootMismatch
 
 	pod := &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{
@@ -188,7 +236,7 @@ func (e *Environment) Create() error {
 		Spec: corev1.PodSpec{
 			SecurityContext: &corev1.PodSecurityContext{
 				FSGroup:             &[]int64{2000}[0],
-				FSGroupChangePolicy: ptrPodFSGroupChangePolicy("OnRootMismatch"),
+				FSGroupChangePolicy: &fsGroupChangePolicy,
 			},
 			DNSPolicy: dnspolicy,
 			DNSConfig: &corev1.PodDNSConfig{Nameservers: config.Get().Cluster.Network.Dns},
@@ -208,7 +256,7 @@ func (e *Environment) Create() error {
 					Name: "storage",
 					VolumeSource: corev1.VolumeSource{
 						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-							ClaimName: e.Id + "-pvc",
+							ClaimName: fmt.Sprintf("%s-pvc", e.Id),
 						},
 					},
 				},
@@ -217,7 +265,7 @@ func (e *Environment) Create() error {
 					VolumeSource: corev1.VolumeSource{
 						ConfigMap: &corev1.ConfigMapVolumeSource{
 							LocalObjectReference: corev1.LocalObjectReference{
-								Name: "kuber",
+								Name: "sftp",
 							},
 						},
 					},
@@ -241,11 +289,11 @@ func (e *Environment) Create() error {
 					WorkingDir:      "/home/container",
 					Ports: []corev1.ContainerPort{
 						{
-							ContainerPort: int32(a.DefaultPort),
+							ContainerPort: port,
 							Protocol:      corev1.Protocol("TCP"),
 						},
 						{
-							ContainerPort: int32(a.DefaultPort),
+							ContainerPort: port,
 							Protocol:      corev1.Protocol("UDP"),
 						},
 					},
@@ -255,12 +303,12 @@ func (e *Environment) Create() error {
 					},
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
-							corev1.ResourceCPU:    *resource.NewMilliQuantity(resources.CpuLimit*10, resource.DecimalSI),
-							corev1.ResourceMemory: *resource.NewQuantity(resources.BoundedMemoryLimit(), resource.BinarySI),
+							corev1.ResourceCPU:    *cpuLimit,
+							corev1.ResourceMemory: *memoryLimit,
 						},
 						Requests: corev1.ResourceList{
-							corev1.ResourceCPU:    *resource.NewMilliQuantity(resources.CpuLimit*10, resource.DecimalSI),
-							corev1.ResourceMemory: *resource.NewQuantity(resources.BoundedMemoryLimit(), resource.BinarySI),
+							corev1.ResourceCPU:    *cpuRequest,
+							corev1.ResourceMemory: *resource.NewQuantity(memoryLimit.Value()/2, resource.BinarySI),
 						},
 					},
 					VolumeMounts: []corev1.VolumeMount{
@@ -277,7 +325,7 @@ func (e *Environment) Create() error {
 				{
 					Name:            "sftp-server",
 					Image:           cfg.System.Sftp.SftpImage,
-					ImagePullPolicy: corev1.PullIfNotPresent,
+					ImagePullPolicy: imagepullpolicy,
 					Env: []corev1.EnvVar{
 						{
 							Name:  "P_SERVER_UUID",
@@ -286,7 +334,6 @@ func (e *Environment) Create() error {
 					},
 					Ports: []corev1.ContainerPort{
 						{
-							HostPort:      0,
 							ContainerPort: int32(config.Get().System.Sftp.Port),
 							Protocol:      corev1.Protocol("TCP"),
 						},
@@ -308,12 +355,72 @@ func (e *Environment) Create() error {
 					},
 				},
 			},
-			RestartPolicy: corev1.RestartPolicy("Never"),
+			RestartPolicy: corev1.RestartPolicyNever,
 		},
 	}
 
-	// Assign all TCP / UDP ports to the container
-	for b := range a.Bindings() {
+	// Prevents high CPU usage of kubelet by preventing chown on the entire CSI
+	if pod.Spec.SecurityContext.FSGroupChangePolicy == nil {
+		fsGroupChangePolicy := corev1.FSGroupChangeOnRootMismatch
+		pod.Spec.SecurityContext.FSGroupChangePolicy = &fsGroupChangePolicy
+	}
+
+	// Check if Node Selector array is empty before we continue
+	if len(e.Configuration.NodeSelectors()) > 1 {
+		pod.Spec.NodeSelector = map[string]string{}
+
+		// Loop through the map and create a node selector string
+		for k, v := range e.Configuration.NodeSelectors() {
+			pod.Spec.NodeSelector[k] = v
+		}
+	}
+
+	// for _, k := range cfs {
+	// replacement := make(map[string]string)
+	// for _, t := range k.Replace {
+	// 	replacement[t.Match] = t.ReplaceWith.String()
+	// }
+
+	// Generate the init container ENV from a loop
+	// envs := []corev1.EnvVar{}
+
+	// for key, value := range replacement {
+	// 	envs = append(envs, corev1.EnvVar{
+	// 		Name:  fmt.Sprintf("%s_%s", strings.ToUpper(strings.ReplaceAll(k.FileName, ".", "_")), key),
+	// 		Value: value,
+	// 	})
+	// }
+
+	// command := k.Parse(k.FileName, false)
+
+	// Initialize an empty slice of initContainers
+	// pod.Spec.InitContainers = []corev1.Container{}
+
+	// Add a new initContainer to the Pod
+	// newInitContainer := corev1.Container{
+	// 	Name:      "replace-" + strings.ToLower(strings.ReplaceAll(k.FileName, ".", "-")),
+	// 	Image:     "busybox",
+	// 	Command:   command,
+	// 	Env:       envs,
+	// 	Resources: corev1.ResourceRequirements{},
+	// 	VolumeMounts: []corev1.VolumeMount{
+	// 		{
+	// 			Name:      "storage",
+	// 			MountPath: "/home/container",
+	// 		},
+	// 	},
+	// }
+
+	// pod.Spec.InitContainers = append(pod.Spec.InitContainers, newInitContainer)
+	// }
+
+	// Assign all TCP / UDP ports or allocations to the container
+	bindings := p.Bindings()
+	if len(bindings) == 0 {
+		bindings = a.Bindings()
+	}
+
+	for b := range bindings {
 		port, err := strconv.ParseInt(b.Port(), 10, 32)
 		if err != nil {
 			return err
@@ -348,7 +455,7 @@ func (e *Environment) Create() error {
 		securityContext.RunAsGroup = &[]int64{int64(cfg.System.User.Rootless.ContainerGID)}[0]
 	}
 
-	// Check if the services exists before we create the actual pod
+	// Check if the services exists before we create the actual pod.
 	err := e.CreateService()
 	if err != nil {
 		return err
@@ -362,87 +469,33 @@ func (e *Environment) Create() error {
 }
 
 // Google GKE Autopilot
-// May not contain more than 1 protocol when type is 'LoadBalancer'
-//
-// @see https://stackoverflow.com/questions/65094464/expose-both-tcp-and-udp-from-the-same-ingress
+// May not contain more than 1 protocol when type is 'LoadBalancer'.
 func (e *Environment) CreateService() error {
 	ctx := context.Background()
 
 	cfg := config.Get()
+	p := e.Configuration.Ports()
 	a := e.Configuration.Allocations()
 
-	var servicetype string
-	switch cfg.Cluster.ServiceType {
-	case "loadbalancer":
-		servicetype = "LoadBalancer"
-	default:
-		servicetype = "NodePort"
+	serviceTypeMap := map[string]string{
+		"loadbalancer": "LoadBalancer",
 	}
 
-	udp := &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Service",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "kuber-" + e.Id + "-udp",
-			Namespace: config.Get().Cluster.Namespace,
-			Labels: map[string]string{
-				"uuid": e.Id,
-			},
-		},
-		Spec: corev1.ServiceSpec{
-			Ports: []corev1.ServicePort{
-				{
-					Name:     "udp" + strconv.Itoa(a.DefaultPort),
-					Protocol: corev1.ProtocolUDP,
-					Port:     int32(a.DefaultPort),
-				},
-			},
-			Selector: map[string]string{
-				"uuid": e.Id,
-			},
-			Type:                     corev1.ServiceType(servicetype),
-			ExternalTrafficPolicy:    corev1.ServiceExternalTrafficPolicyTypeLocal,
-			HealthCheckNodePort:      0,
-			PublishNotReadyAddresses: true,
-		},
+	serviceType := serviceTypeMap[cfg.Cluster.ServiceType]
+	if serviceType == "" {
+		serviceType = "NodePort"
 	}
 
-	if cfg.Cluster.ServiceType == "loadbalancer" {
-		if cfg.Cluster.MetalLBSharedIP && len(cfg.Cluster.MetalLBAddressPool) != 0 {
-			udp.Annotations = map[string]string{
-				"metallb.universe.tf/address-pool":    cfg.Cluster.MetalLBAddressPool,
-				"metallb.universe.tf/allow-shared-ip": e.Id,
-			}
-		} else if cfg.Cluster.MetalLBSharedIP && len(cfg.Cluster.MetalLBAddressPool) == 0 {
-			udp.Annotations = map[string]string{
-				"metallb.universe.tf/allow-shared-ip": e.Id,
-			}
-		}
+	var externalPolicy corev1.ServiceExternalTrafficPolicyType
+	trafficPolicies := map[string]corev1.ServiceExternalTrafficPolicyType{
+		"cluster": corev1.ServiceExternalTrafficPolicyTypeCluster,
+		"local":   corev1.ServiceExternalTrafficPolicyTypeLocal,
 	}
 
-	for b := range a.Bindings() {
-		protocol := strings.ToUpper(b.Proto())
-
-		if protocol == "UDP" {
-			port, err := strconv.ParseInt(b.Port(), 10, 32)
-			if err != nil {
-				return err
-			}
-
-			udp.Spec.Ports = append(udp.Spec.Ports,
-				corev1.ServicePort{Name: b.Proto() + b.Port(),
-					Protocol: corev1.Protocol(protocol),
-					Port:     int32(port),
-				})
-		}
-	}
-
-	if _, err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).Create(ctx, udp, metav1.CreateOptions{}); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return errors.Wrap(err, "environment/kubernetes: failed to create UDP service")
-		}
+	if policy, ok := trafficPolicies[cfg.Cluster.ExternalTrafficPolicy]; ok {
+		externalPolicy = policy
+	} else {
+		externalPolicy = corev1.ServiceExternalTrafficPolicyTypeCluster
 	}
 
 	tcp := &corev1.Service{
@@ -460,54 +513,121 @@ func (e *Environment) CreateService() error {
 		Spec: corev1.ServiceSpec{
 			Ports: []corev1.ServicePort{
 				{
-					Name:     "tcp" + strconv.Itoa(cfg.System.Sftp.Port),
-					Protocol: corev1.ProtocolTCP,
+					Name:     "tcp2022",
+					Protocol: corev1.Protocol("TCP"),
 					Port:     int32(cfg.System.Sftp.Port),
-				},
-				{
-					Name:     "tcp" + strconv.Itoa(a.DefaultPort),
-					Protocol: corev1.ProtocolTCP,
-					Port:     int32(a.DefaultPort),
+					TargetPort: intstr.IntOrString{
+						Type:   intstr.Int,
+						IntVal: int32(cfg.System.Sftp.Port),
+					},
+					NodePort: 0,
 				},
 			},
 			Selector: map[string]string{
 				"uuid": e.Id,
 			},
-			Type:                     corev1.ServiceType(servicetype),
-			ExternalTrafficPolicy:    corev1.ServiceExternalTrafficPolicyTypeLocal,
-			HealthCheckNodePort:      0,
-			PublishNotReadyAddresses: true,
+			Type:                          corev1.ServiceType(serviceType),
+			ExternalTrafficPolicy:         corev1.ServiceExternalTrafficPolicyType(externalPolicy),
+			HealthCheckNodePort:           0,
+			PublishNotReadyAddresses:      true,
+			AllocateLoadBalancerNodePorts: new(bool),
 		},
 	}
 
-	if cfg.Cluster.ServiceType == "loadbalancer" {
-		if cfg.Cluster.MetalLBSharedIP && len(cfg.Cluster.MetalLBAddressPool) != 0 {
-			udp.Annotations = map[string]string{
-				"metallb.universe.tf/address-pool":    cfg.Cluster.MetalLBAddressPool,
-				"metallb.universe.tf/allow-shared-ip": e.Id,
-			}
-		} else if cfg.Cluster.MetalLBSharedIP && len(cfg.Cluster.MetalLBAddressPool) == 0 {
-			udp.Annotations = map[string]string{
-				"metallb.universe.tf/allow-shared-ip": e.Id,
-			}
+	udp := &corev1.Service{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Service",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "kuber-" + e.Id + "-udp",
+			Namespace: config.Get().Cluster.Namespace,
+			Labels: map[string]string{
+				"uuid": e.Id,
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				"uuid": e.Id,
+			},
+			Type:                          corev1.ServiceType(serviceType),
+			ExternalTrafficPolicy:         corev1.ServiceExternalTrafficPolicyType(externalPolicy),
+			HealthCheckNodePort:           0,
+			PublishNotReadyAddresses:      true,
+			AllocateLoadBalancerNodePorts: new(bool),
+		},
+	}
+
+	if serviceType == "LoadBalancer" && cfg.Cluster.MetalLBSharedIP {
+		tcp.Annotations = map[string]string{
+			"metallb.universe.tf/allow-shared-ip": e.Id,
+		}
+
+		udp.Annotations = map[string]string{
+			"metallb.universe.tf/allow-shared-ip": e.Id,
+		}
+
+		if len(cfg.Cluster.MetalLBAddressPool) != 0 {
+			tcp.Annotations["metallb.universe.tf/address-pool"] = cfg.Cluster.MetalLBAddressPool
+			udp.Annotations["metallb.universe.tf/address-pool"] = cfg.Cluster.MetalLBAddressPool
 		}
 	}
 
-	for b := range a.Bindings() {
+	bindings := p.Bindings()
+	if len(bindings) == 0 {
+		bindings = a.Bindings()
+	}
+
+	for b := range bindings {
 		protocol := strings.ToUpper(b.Proto())
 
+		var service *corev1.Service
 		if protocol == "TCP" {
-			port, err := strconv.ParseInt(b.Port(), 10, 32)
-			if err != nil {
-				return err
-			}
+			service = tcp
+		} else if protocol == "UDP" {
+			service = udp
+		}
 
-			tcp.Spec.Ports = append(tcp.Spec.Ports,
-				corev1.ServicePort{
-					Name:     b.Proto() + b.Port(),
-					Protocol: corev1.Protocol(protocol),
-					Port:     int32(port),
-				})
+		port, err := strconv.ParseInt(b.Port(), 10, 32)
+		if err != nil {
+			return err
+		}
+
+		service.Spec.Ports = append(service.Spec.Ports,
+			corev1.ServicePort{
+				Name:     b.Proto() + b.Port(),
+				Protocol: corev1.Protocol(protocol),
+				Port:     int32(port),
+			})
+
+		if serviceType == "LoadBalancer" {
+			service.Spec.Ports[len(service.Spec.Ports)-1].NodePort = 0
+			*service.Spec.AllocateLoadBalancerNodePorts = false
+			service.Spec.LoadBalancerIP = a.DefaultMapping.Ip
+		}
+	}
+
+	services, err := e.client.CoreV1().Services(cfg.Cluster.Namespace).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	for _, service := range services.Items {
+		if service.Spec.Type == "LoadBalancer" && service.Status.LoadBalancer.Ingress != nil {
+			for _, ingress := range service.Status.LoadBalancer.Ingress {
+				if ingress.IP == a.DefaultMapping.Ip {
+					shared := service.Annotations["metallb.universe.tf/allow-shared-ip"]
+
+					if len(shared) > 0 {
+						annotations := map[string]string{
+							"metallb.universe.tf/allow-shared-ip": shared,
+						}
+						tcp.Annotations = annotations
+						udp.Annotations = annotations
+
+						tcp.Spec.Ports[0].Port = tcp.Spec.Ports[0].Port + 1
+					}
+				}
+			}
 		}
 	}
 
@@ -515,6 +635,175 @@ func (e *Environment) CreateService() error {
 		if !apierrors.IsAlreadyExists(err) {
 			return errors.Wrap(err, "environment/kubernetes: failed to create TCP service")
 		}
+	}
+
+	if _, err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).Create(ctx, udp, metav1.CreateOptions{}); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return errors.Wrap(err, "environment/kubernetes: failed to create UDP service")
+		}
+	}
+
+	return nil
+}
+
+func (e *Environment) CreateSFTP() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := config.Get()
+
+	dnsPolicies := map[string]corev1.DNSPolicy{
+		"clusterfirstwithhostnet": corev1.DNSClusterFirstWithHostNet,
+		"default":                 corev1.DNSDefault,
+		"none":                    corev1.DNSNone,
+		"clusterfirst":            corev1.DNSClusterFirst,
+	}
+
+	dnspolicy, ok := dnsPolicies[cfg.Cluster.DNSPolicy]
+	if !ok {
+		dnspolicy = corev1.DNSClusterFirst
+	}
+
+	imagePullPolicies := map[string]corev1.PullPolicy{
+		"always":       corev1.PullAlways,
+		"never":        corev1.PullNever,
+		"ifnotpresent": corev1.PullIfNotPresent,
+	}
+
+	imagepullpolicy, ok := imagePullPolicies[cfg.Cluster.ImagePullPolicy]
+	if !ok {
+		imagepullpolicy = corev1.PullIfNotPresent
+	}
+
+	fsGroupChangePolicy := corev1.FSGroupChangeOnRootMismatch
+
+	pod := &corev1.Pod{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Pod",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      e.Id,
+			Namespace: cfg.Cluster.Namespace,
+			Labels: map[string]string{
+				"uuid":          e.Id,
+				"ContainerType": "sftp",
+			},
+		},
+		Spec: corev1.PodSpec{
+			SecurityContext: &corev1.PodSecurityContext{
+				FSGroup:             &[]int64{2000}[0],
+				FSGroupChangePolicy: &fsGroupChangePolicy,
+			},
+			DNSPolicy: dnspolicy,
+			DNSConfig: &corev1.PodDNSConfig{Nameservers: config.Get().Cluster.Network.Dns},
+			Volumes: []corev1.Volume{
+				{
+					Name: "storage",
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: fmt.Sprintf("%s-pvc", e.Id),
+						},
+					},
+				},
+				{
+					Name: "config",
+					VolumeSource: corev1.VolumeSource{
+						ConfigMap: &corev1.ConfigMapVolumeSource{
+							LocalObjectReference: corev1.LocalObjectReference{
+								Name: "sftp",
+							},
+						},
+					},
+				},
+				{
+					Name: "secret",
+					VolumeSource: corev1.VolumeSource{
+						Secret: &corev1.SecretVolumeSource{
+							SecretName: "ed25519",
+						},
+					},
+				},
+			},
+			Containers: []corev1.Container{
+				{
+					Name:            "sftp-server",
+					Image:           cfg.System.Sftp.SftpImage,
+					ImagePullPolicy: imagepullpolicy,
+					Env: []corev1.EnvVar{
+						{
+							Name:  "P_SERVER_UUID",
+							Value: e.Id,
+						},
+					},
+					Ports: []corev1.ContainerPort{
+						{
+							ContainerPort: int32(config.Get().System.Sftp.Port),
+							Protocol:      corev1.Protocol("TCP"),
+						},
+					},
+					VolumeMounts: []corev1.VolumeMount{
+						{
+							Name:      "config",
+							MountPath: "/etc/kubectyl",
+						},
+						{
+							Name:      "storage",
+							MountPath: path.Join(cfg.System.Data, e.Id),
+						},
+						{
+							Name:      "secret",
+							ReadOnly:  true,
+							MountPath: path.Join(cfg.System.Data, ".sftp"),
+						},
+					},
+				},
+			},
+			RestartPolicy: corev1.RestartPolicyAlways,
+		},
+	}
+
+	_, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			pod, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(ctx, e.Id, metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			if pod.Status.Phase != v1.PodRunning {
+				var zero int64 = 0
+				policy := metav1.DeletePropagationForeground
+
+				if err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ctx, e.Id, metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &policy}); err != nil {
+					return err
+				}
+
+				return e.CreateSFTP()
+			}
+		} else {
+			return errors.Wrap(err, "environment/kubernetes: failed to create SFTP pod")
+		}
+	}
+
+	err = wait.PollImmediate(time.Second, 30*time.Second, func() (bool, error) {
+		pod, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(ctx, e.Id, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+
+		switch pod.Status.Phase {
+		case v1.PodPending:
+			return false, nil
+		case v1.PodRunning:
+			return true, nil
+		case v1.PodFailed, v1.PodSucceeded:
+			return false, fmt.Errorf("pod ran to completion")
+		default:
+			return false, fmt.Errorf("unknown pod status")
+		}
+	})
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -551,19 +840,28 @@ func (e *Environment) Destroy() error {
 	}
 
 	// Delete configmap
-	err = e.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).Delete(context.Background(), e.Id+"-configmap", metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &policy})
+	err = e.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).Delete(context.Background(), e.Id+"-configmap", metav1.DeleteOptions{
+		GracePeriodSeconds: &zero,
+		PropagationPolicy:  &policy,
+	})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 
 	// Delete pod
-	err = e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(context.Background(), e.Id, metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &policy})
+	err = e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(context.Background(), e.Id, metav1.DeleteOptions{
+		GracePeriodSeconds: &zero,
+		PropagationPolicy:  &policy,
+	})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 
 	// Delete pvc
-	err = e.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Delete(context.Background(), e.Id+"-pvc", metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &policy})
+	err = e.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Delete(context.Background(), e.Id+"-pvc", metav1.DeleteOptions{
+		GracePeriodSeconds: &zero,
+		PropagationPolicy:  &policy,
+	})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}

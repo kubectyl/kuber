@@ -1,6 +1,8 @@
 package environment
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -15,6 +17,7 @@ import (
 	"emperror.dev/errors"
 	"github.com/apex/log"
 	"github.com/kubectyl/kuber/config"
+	"gopkg.in/yaml.v2"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
@@ -26,36 +29,48 @@ import (
 func Cluster() (c *rest.Config, clientset *kubernetes.Clientset, err error) {
 	cfg := config.Get().Cluster
 
-	// Load the cluster certificate authority data
-	caData, err := ioutil.ReadFile(cfg.CAFile)
-	if err != nil {
-		fmt.Printf("Error reading certificate authority data: %v\n", err)
-		return
-	}
-
-	// Load the client certificate data
-	certData, err := ioutil.ReadFile(cfg.CertFile)
-	if err != nil {
-		fmt.Printf("Error reading client certificate data: %v\n", err)
-		return
-	}
-
-	// Load the client key data
-	keyData, err := ioutil.ReadFile(cfg.KeyFile)
-	if err != nil {
-		fmt.Printf("Error reading client key data: %v\n", err)
-		return
-	}
-
 	c = &rest.Config{
 		Host:        cfg.Host,
 		BearerToken: cfg.BearerToken,
 		TLSClientConfig: rest.TLSClientConfig{
 			Insecure: cfg.Insecure,
-			CAData:   caData,
-			CertData: certData,
-			KeyData:  keyData,
 		},
+	}
+
+	var caData []byte
+	if cfg.KeyFile != "" && !cfg.Insecure {
+		// Load the cluster certificate authority data
+		caData, err = ioutil.ReadFile(cfg.CAFile)
+		if err != nil {
+			fmt.Printf("Error reading certificate authority data: %v\n", err)
+			return
+		}
+
+		c.TLSClientConfig.CAData = caData
+	}
+
+	var certData []byte
+	if cfg.KeyFile != "" && !cfg.Insecure {
+		// Load the client certificate data
+		certData, err = ioutil.ReadFile(cfg.CertFile)
+		if err != nil {
+			fmt.Printf("Error reading client certificate data: %v\n", err)
+			return
+		}
+
+		c.TLSClientConfig.CertData = certData
+	}
+
+	var keyData []byte
+	if cfg.KeyFile != "" && !cfg.Insecure {
+		// Load the client key data
+		keyData, err = ioutil.ReadFile(cfg.KeyFile)
+		if err != nil {
+			fmt.Printf("Error reading client key data: %v\n", err)
+			return
+		}
+
+		c.TLSClientConfig.KeyData = keyData
 	}
 
 	client, err := kubernetes.NewForConfig(c)
@@ -71,7 +86,40 @@ func CreateSftpConfigmap() error {
 		return err
 	}
 
-	fileContents, err := os.ReadFile(config.DefaultLocation)
+	cfg := config.Get()
+
+	tempDir := cfg.System.TmpDirectory
+	tempFile := filepath.Join(tempDir, "sftp.yaml")
+
+	data := map[string]interface{}{
+		"debug":    cfg.Debug,
+		"token_id": cfg.AuthenticationTokenId,
+		"token":    cfg.AuthenticationToken,
+		"system": map[string]interface{}{
+			"log_directory": cfg.System.LogDirectory,
+			"data":          cfg.System.Data,
+			"sftp":          cfg.System.Sftp,
+		},
+		"remote":       cfg.PanelLocation,
+		"remote_query": cfg.RemoteQuery,
+	}
+
+	yamlData, err := yaml.Marshal(&data)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(tempDir, 0o700); err != nil {
+		return errors.WithMessage(err, "could not create temporary directory for sftp configmap")
+	}
+
+	err = os.WriteFile(tempFile, yamlData, 0644)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tempFile)
+
+	fileContents, err := os.ReadFile(tempFile)
 	if err != nil {
 		return err
 	}
@@ -82,7 +130,7 @@ func CreateSftpConfigmap() error {
 			APIVersion: "v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "kuber",
+			Name:      "sftp",
 			Namespace: config.Get().Cluster.Namespace,
 		},
 		Data: map[string]string{
@@ -92,7 +140,7 @@ func CreateSftpConfigmap() error {
 
 	client := c.CoreV1().ConfigMaps(config.Get().Cluster.Namespace)
 
-	log.WithField("configmap", "kuber").Info("checking and updating sftp configmap")
+	log.WithField("configmap", "sftp").Info("checking and updating sftp configmap")
 	_, errG := client.Create(context.TODO(), configmap, metav1.CreateOptions{})
 	if errG != nil {
 		if apierrors.IsAlreadyExists(errG) {
@@ -118,16 +166,6 @@ func CreateSftpConfigmap() error {
 }
 
 func CreateSftpSecret() error {
-	if _, err := os.Stat(PrivateKeyPath()); os.IsNotExist(err) {
-		if err := generateED25519PrivateKey(); err != nil {
-			return err
-		}
-	} else if err != nil {
-		return errors.Wrap(err, "sftp: could not stat private key file")
-	}
-
-	fileContents, _ := os.ReadFile(PrivateKeyPath())
-
 	_, c, err := Cluster()
 	if err != nil {
 		return err
@@ -147,26 +185,56 @@ func CreateSftpSecret() error {
 
 	client := c.CoreV1().Secrets(config.Get().Cluster.Namespace)
 
-	_, errG := client.Get(context.TODO(), "ed25519", metav1.GetOptions{})
-	if errG != nil {
-		if apierrors.IsNotFound(errG) {
-			secret.Data = map[string][]byte{
-				"id_ed25519": fileContents,
-			}
+	sec, err := client.Get(context.Background(), "ed25519", metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
 
-			_, err = client.Create(context.TODO(), secret, metav1.CreateOptions{})
-			if err != nil {
+	if apierrors.IsNotFound(err) {
+		if _, err := os.Stat(PrivateKeyPath()); os.IsNotExist(err) {
+			if err := generateED25519PrivateKey(); err != nil {
 				return err
 			}
-		} else if apierrors.IsAlreadyExists(errG) {
-			secret.Data = map[string][]byte{
-				"id_ed25519": fileContents,
-			}
+		} else if err != nil {
+			return errors.Wrap(err, "sftp: could not stat private key file")
+		}
 
-			_, err = client.Update(context.TODO(), secret, metav1.UpdateOptions{})
-			if err != nil {
-				return err
-			}
+		fileContents, err := os.ReadFile(PrivateKeyPath())
+		if err != nil {
+			return err
+		}
+
+		secret.Data = map[string][]byte{
+			"id_ed25519": fileContents,
+		}
+
+		if _, err = client.Create(context.Background(), secret, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+	} else {
+		if err := os.MkdirAll(path.Dir(PrivateKeyPath()), 0o755); err != nil {
+			return errors.Wrap(err, "sftp: could not create internal sftp data directory")
+		}
+
+		privateKeyFile, err := os.OpenFile(PrivateKeyPath(), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+		if err != nil {
+			return err
+		}
+		defer privateKeyFile.Close()
+
+		privateKeyWriter := bufio.NewWriter(privateKeyFile)
+		scanner := bufio.NewScanner(bytes.NewReader(sec.Data["id_ed25519"]))
+
+		for scanner.Scan() {
+			privateKeyWriter.WriteString(scanner.Text() + "\n")
+		}
+
+		if err := scanner.Err(); err != nil {
+			return err
+		}
+
+		if err := privateKeyWriter.Flush(); err != nil {
+			return err
 		}
 	}
 

@@ -217,11 +217,13 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 			// This does mean that booting kuber after a catastrophic machine crash and wiping out the Docker images
 			// as a result will result in a slow boot.
 			if !r && (st == environment.ProcessRunningState || st == environment.ProcessStartingState) {
-				if err := s.HandlePowerAction(server.PowerActionStart); err != nil {
-					s.Log().WithField("error", err).Warn("failed to return server to running state")
-				}
+				go func() {
+					if err := s.HandlePowerAction(server.PowerActionStart); err != nil {
+						s.Log().WithField("error", err).Warn("failed to return server to running state")
+					}
+				}()
 			} else if r || (!r && s.IsRunning()) {
-				// If the server is currently running on Docker, mark the process as being in that state.
+				// If the server is currently running on Kubernetes, mark the process as being in that state.
 				// We never want to stop an instance that is currently running external from Kuber since
 				// that is a good way of keeping things running even if Kuber gets in a very corrupted state.
 				//
@@ -238,6 +240,13 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 				// make a call to set that state just to ensure we don't ever accidentally end up with some invalid
 				// state being tracked.
 				s.Environment.SetState(environment.ProcessOfflineState)
+
+				// Avoid blocking whole process
+				go func() {
+					if err := s.Environment.CreateSFTP(); err != nil {
+						log.WithField("error", err).Warn("failed to create server SFTP pod")
+					}
+				}()
 			}
 
 			if state := s.Environment.State(); state == environment.ProcessStartingState || state == environment.ProcessRunningState {

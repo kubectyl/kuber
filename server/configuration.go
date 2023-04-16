@@ -6,13 +6,13 @@ import (
 	"github.com/kubectyl/kuber/environment"
 )
 
-type EggConfiguration struct {
-	// The internal UUID of the Egg on the Panel.
+type RocketConfiguration struct {
+	// The internal UUID of the Rocket on the Panel.
 	ID string `json:"id"`
 
 	// Maintains a list of files that are blacklisted for opening/editing/downloading
 	// or basically any type of access on the server by any user. This is NOT the same
-	// as a per-user denylist, this is defined at the Egg level.
+	// as a per-user denylist, this is defined at the Rocket level.
 	FileDenylist []string `json:"file_denylist"`
 }
 
@@ -40,7 +40,7 @@ type Configuration struct {
 
 	// By default this is false, however if selected within the Panel while installing or re-installing a
 	// server, specific installation scripts will be skipped for the server process.
-	SkipEggScripts bool `json:"skip_egg_scripts"`
+	SkipRocketScripts bool `json:"skip_rocket_scripts"`
 
 	// An array of environment variables that should be passed along to the running
 	// server process.
@@ -49,11 +49,14 @@ type Configuration struct {
 	// Labels is a map of container labels that should be applied to the running server process.
 	Labels map[string]string `json:"labels"`
 
+	Ports                 environment.Ports       `json:"ports"`
 	Allocations           environment.Allocations `json:"allocations"`
 	Build                 environment.Limits      `json:"build"`
 	CrashDetectionEnabled bool                    `json:"crash_detection_enabled"`
 	Mounts                []Mount                 `json:"mounts"`
-	Egg                   EggConfiguration        `json:"egg,omitempty"`
+	Rocket                RocketConfiguration     `json:"rocket,omitempty"`
+
+	NodeSelectors map[string]string `json:"node_selectors"`
 
 	Container struct {
 		// Defines the Docker image that will be used for this server

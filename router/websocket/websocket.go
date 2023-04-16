@@ -148,7 +148,7 @@ func (h *Handler) SendJson(v Message) error {
 			}
 		}
 
-		// If the user does not have permission to see backup events, do not emit
+		// If the user does not have permission to see snapshot events, do not emit
 		// them over the socket.
 		if strings.HasPrefix(v.Event, server.BackupCompletedEvent) {
 			if !j.HasPermission(PermissionReceiveBackups) {

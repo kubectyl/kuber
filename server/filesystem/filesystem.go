@@ -48,6 +48,10 @@ type Filesystem struct {
 	manager *BasicSFTPManager
 }
 
+var (
+	clientConfig *ssh.ClientConfig
+)
+
 // New creates a new Filesystem instance for a given server.
 func New(root string, size int64, denylist []string, addr string) *Filesystem {
 	key, err := ioutil.ReadFile(environment.PrivateKeyPath())
@@ -58,7 +62,7 @@ func New(root string, size int64, denylist []string, addr string) *Filesystem {
 	if err != nil {
 		log.Fatalf("Unable to parse private key: %v", err)
 	}
-	clientConfig := &ssh.ClientConfig{
+	clientConfig = &ssh.ClientConfig{
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(signer),
 		},
@@ -76,8 +80,13 @@ func New(root string, size int64, denylist []string, addr string) *Filesystem {
 		lastLookupTime:    &usageLookupTime{},
 		lookupInProgress:  system.NewAtomicBool(false),
 		denylist:          ignore.CompileIgnoreLines(denylist...),
-		manager:           NewBasicSFTPManager(fmt.Sprintf("%s:%d", addr, config.Get().System.Sftp.Port), clientConfig),
+		manager:           NewBasicSFTPManager(addr, clientConfig),
 	}
+}
+
+func (fs *Filesystem) SetManager(addr string) error {
+	fs.manager = NewBasicSFTPManager(addr, clientConfig)
+	return nil
 }
 
 // Path returns the root path for the Filesystem instance.
@@ -590,8 +599,13 @@ func (fs *Filesystem) ListDirectory(p string) ([]Stat, error) {
 	// }
 
 	connection, err := fs.manager.GetConnection()
-	if err != nil {
+	if connection == nil || err != nil {
 		return make([]Stat, 0), err
+	}
+
+	// Check if the SFTP client connection is valid
+	if connection.sftpClient == nil {
+		return nil, errors.New("SFTP client connection is invalid")
 	}
 
 	files, err := connection.sftpClient.ReadDir(p)

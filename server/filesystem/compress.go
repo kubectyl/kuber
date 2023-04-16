@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	iofs "io/fs"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -47,30 +48,66 @@ func (fs *Filesystem) CompressFiles(dir string, paths []string) (os.FileInfo, er
 		return nil, err
 	}
 
-	a := &Archive{BasePath: cleanedRootDir, Files: cleaned}
+	connection, err := fs.manager.GetConnection()
+	if err != nil {
+		return nil, err
+	}
+
 	d := path.Join(
 		cleanedRootDir,
 		fmt.Sprintf("archive-%s.tar.gz", strings.ReplaceAll(time.Now().Format(time.RFC3339), ":", "")),
 	)
-
-	if err := a.Create(context.Background(), d); err != nil {
-		return nil, err
-	}
-
-	f, err := os.Stat(d)
+	archiveFile, err := connection.sftpClient.Create(d)
 	if err != nil {
-		_ = os.Remove(d)
 		return nil, err
 	}
+	defer archiveFile.Close()
 
-	if err := fs.HasSpaceFor(f.Size()); err != nil {
-		_ = os.Remove(d)
-		return nil, err
+	archiveWriter := zip.NewWriter(archiveFile)
+	defer archiveWriter.Close()
+
+	for _, remoteFile := range cleaned {
+		remoteReader, err := connection.sftpClient.Open(remoteFile)
+		if err != nil {
+			log.Printf("Failed to open remote file %q: %v", remoteFile, err)
+			continue
+		}
+		defer remoteReader.Close()
+
+		zipFile, err := archiveWriter.Create(remoteReader.Name())
+		if err != nil {
+			return nil, fmt.Errorf("failed to add file %q to archive: %v", remoteReader.Name(), err)
+		}
+		if _, err := io.Copy(zipFile, remoteReader); err != nil {
+			return nil, fmt.Errorf("failed to compress file %q: %v", remoteReader.Name(), err)
+		}
 	}
 
-	fs.addDisk(f.Size())
+	// a := &Archive{BasePath: cleanedRootDir, Files: cleaned}
+	// d := path.Join(
+	// 	cleanedRootDir,
+	// 	fmt.Sprintf("archive-%s.tar.gz", strings.ReplaceAll(time.Now().Format(time.RFC3339), ":", "")),
+	// )
 
-	return f, nil
+	// if err := a.Create(context.Background(), d); err != nil {
+	// 	return nil, err
+	// }
+
+	// f, err := os.Stat(d)
+	// if err != nil {
+	// 	_ = os.Remove(d)
+	// 	return nil, err
+	// }
+
+	// if err := fs.HasSpaceFor(f.Size()); err != nil {
+	// 	_ = os.Remove(d)
+	// 	return nil, err
+	// }
+
+	// fs.addDisk(f.Size())
+
+	// return f, nil
+	return nil, nil
 }
 
 // SpaceAvailableForDecompression looks through a given archive and determines

@@ -39,7 +39,7 @@ func (s *Server) Install() error {
 
 func (s *Server) install(reinstall bool) error {
 	var err error
-	if !s.Config().SkipEggScripts {
+	if !s.Config().SkipRocketScripts {
 		// Send the start event so the Panel can automatically update. We don't
 		// send this unless the process is actually going to run, otherwise all
 		// sorts of weird rapid UI behavior happens since there isn't an actual
@@ -48,7 +48,7 @@ func (s *Server) install(reinstall bool) error {
 
 		err = s.internalInstall()
 	} else {
-		s.Log().Info("server configured to skip running installation scripts for this egg, not executing process")
+		s.Log().Info("server configured to skip running installation scripts for this rocket, not executing process")
 	}
 
 	s.Log().WithField("was_successful", err == nil).Debug("notifying panel of server install state")
@@ -78,7 +78,7 @@ func (s *Server) install(reinstall bool) error {
 }
 
 // Reinstall reinstalls a server's software by utilizing the installation script
-// for the server egg. This does not touch any existing files for the server,
+// for the server rocket. This does not touch any existing files for the server,
 // other than what the script modifies.
 func (s *Server) Reinstall() error {
 	if s.Environment.State() != environment.ProcessOfflineState {
@@ -164,14 +164,20 @@ func (s *Server) SetRestoring(state bool) {
 
 // RemoveContainer removes the installation container for the server.
 func (ip *InstallationProcess) RemoveContainer() error {
-	err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ip.Server.Context(), ip.Server.ID()+"-installer", metav1.DeleteOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
+	resources := []string{ip.Server.ID() + "-installer", ip.Server.ID(), ip.Server.ID() + "-configmap"}
+
+	for _, resource := range resources {
+		err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ip.Server.Context(), resource, metav1.DeleteOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+
+		err = ip.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).Delete(ip.Server.Context(), resource, metav1.DeleteOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
 	}
-	err = ip.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).Delete(ip.Server.Context(), ip.Server.ID()+"-configmap", metav1.DeleteOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
+
 	return nil
 }
 
@@ -280,7 +286,7 @@ func (ip *InstallationProcess) GetLogPath() string {
 func (ip *InstallationProcess) AfterExecute(containerId string) error {
 	defer ip.RemoveContainer()
 
-	ip.Server.Log().WithField("container_id", containerId).Debug("pulling installation logs for server")
+	ip.Server.Log().WithField("pod_id", containerId).Debug("pulling installation logs for server")
 	reader := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).GetLogs(ip.Server.ID()+"-installer", &corev1.PodLogOptions{
 		Follow: false,
 	})
@@ -458,6 +464,15 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		},
 	}
 
+	if len(ip.Server.Config().NodeSelectors) > 1 {
+		pod.Spec.NodeSelector = map[string]string{}
+
+		// Loop through the map and create a node selector string
+		for k, v := range ip.Server.cfg.NodeSelectors {
+			pod.Spec.NodeSelector[k] = v
+		}
+	}
+
 	// Env
 	for _, k := range ip.Server.GetEnvironmentVariables() {
 		a := strings.SplitN(k, "=", 2)
@@ -489,7 +504,7 @@ func (ip *InstallationProcess) Execute() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ip.Server.Log().WithField("container_id", r.UID).Info("running installation script for server in container")
+	ip.Server.Log().WithField("pod_id", r.UID).Info("running installation script for server in container")
 
 	// Process the install event in the background by listening to the stream output until the
 	// container has stopped, at which point we'll disconnect from it.
@@ -499,7 +514,7 @@ func (ip *InstallationProcess) Execute() (string, error) {
 	go func(id string) {
 		ip.Server.Events().Publish(DaemonMessageEvent, "Starting installation process, this could take a few minutes...")
 
-		conditionFunc := func() (bool, error) {
+		err = wait.PollInfinite(time.Second, func() (bool, error) {
 			pod, err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.TODO(), ip.Server.ID()+"-installer", metav1.GetOptions{})
 			if err != nil {
 				return false, err
@@ -512,9 +527,7 @@ func (ip *InstallationProcess) Execute() (string, error) {
 				return false, nil
 			}
 			return false, nil
-		}
-
-		err = wait.PollInfinite(time.Second, conditionFunc)
+		})
 		if err != nil {
 			ip.Server.Log().WithField("error", err).Warn("pod never entered running phase")
 		}
@@ -524,7 +537,7 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		}
 	}(string(r.UID))
 
-	conditionFunc := func() (bool, error) {
+	err = wait.PollInfinite(time.Second, func() (bool, error) {
 		pod, err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.TODO(), ip.Server.ID()+"-installer", metav1.GetOptions{})
 		if err != nil {
 			return false, err
@@ -537,9 +550,7 @@ func (ip *InstallationProcess) Execute() (string, error) {
 			return false, nil
 		}
 		return false, nil
-	}
-
-	err = wait.PollInfinite(time.Second, conditionFunc)
+	})
 	// Once the container has stopped running we can mark the install process as being completed.
 	if err == nil {
 		ip.Server.Events().Publish(DaemonMessageEvent, "Installation process completed.")
@@ -565,7 +576,7 @@ func (ip *InstallationProcess) StreamOutput(ctx context.Context, id string) erro
 
 	err = system.ScanReader(podLogs, ip.Server.Sink(system.InstallSink).Push)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		ip.Server.Log().WithFields(log.Fields{"container_id": id, "error": err}).Warn("error processing install output lines")
+		ip.Server.Log().WithFields(log.Fields{"pod_id": id, "error": err}).Warn("error processing install output lines")
 	}
 	return nil
 }

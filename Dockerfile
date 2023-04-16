@@ -13,11 +13,14 @@ RUN CGO_ENABLED=0 go build \
     -trimpath \
     -o kuber \
     kuber.go
-RUN echo "ID=\"distroless\"" > /etc/os-release
+# RUN echo "ID=\"distroless\"" > /etc/os-release
+# RUN echo "Europe/Bucharest" > /etc/timezone
 
 # Stage 2 (Final)
-FROM gcr.io/distroless/static:latest
+# FROM gcr.io/distroless/static:latest
+FROM busybox:latest
 COPY --from=builder /etc/os-release /etc/os-release
+# COPY --from=builder /etc/timezone /etc/timezone
 
 COPY --from=builder /app/kuber /usr/bin/
 CMD [ "/usr/bin/kuber", "--config", "/etc/kubectyl/config.yml" ]

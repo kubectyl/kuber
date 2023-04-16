@@ -66,8 +66,6 @@ type SftpConfiguration struct {
 	Port int `default:"2022" json:"bind_port" yaml:"bind_port"`
 	// If set to true, no write actions will be allowed on the SFTP server.
 	ReadOnly bool `default:"false" yaml:"read_only"`
-	// SFTP Client reconnect timeout
-	Timeout int `default:"5" yaml:"timeout"`
 	// The docker image used for the SFTP server.
 	SftpImage string `json:"sftp_image" default:"ghcr.io/kubectyl/sftp-server:latest" yaml:"sftp_image"`
 }

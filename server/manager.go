@@ -196,17 +196,20 @@ func (m *Manager) InitServer(data remote.ServerConfigurationResponse) (*Server, 
 		return nil, errors.WithStackIf(err)
 	}
 
-	// TODO: initialize the filesystem here so that we don't receive panic later
-	s.fs = filesystem.New(filepath.Join(config.Get().System.Data, s.ID()), s.DiskSpace(), s.Config().Egg.FileDenylist, "")
+	// Initialize the filesystem here so that we don't receive panic later
+	s.fs = filesystem.New(filepath.Join(config.Get().System.Data, s.ID()), s.DiskSpace(), s.Config().Rocket.FileDenylist, "")
 
 	// Right now we only support a Docker based environment, so I'm going to hard code
 	// this logic in. When we're ready to support other environment we'll need to make
 	// some modifications here, obviously.
 	settings := environment.Settings{
-		Mounts:      s.Mounts(),
-		Allocations: s.cfg.Allocations,
-		Limits:      s.cfg.Build,
-		Labels:      s.cfg.Labels,
+		Mounts:             s.Mounts(),
+		Ports:              s.cfg.Ports,
+		Allocations:        s.cfg.Allocations,
+		Limits:             s.cfg.Build,
+		Labels:             s.cfg.Labels,
+		ConfigurationFiles: s.ProcessConfiguration().ConfigurationFiles,
+		NodeSelectors:      s.cfg.NodeSelectors,
 	}
 
 	envCfg := environment.NewConfiguration(settings, s.GetEnvironmentVariables())
@@ -222,7 +225,6 @@ func (m *Manager) InitServer(data remote.ServerConfigurationResponse) (*Server, 
 		s.StartEventListeners()
 	}
 
-	// TODO: this function looks like shit, but it works
 	services := s.Environment.GetServiceDetails()
 	if len(services) > 0 {
 		name := fmt.Sprintf("kuber-%s-tcp", s.ID())
@@ -231,9 +233,24 @@ func (m *Manager) InitServer(data remote.ServerConfigurationResponse) (*Server, 
 				continue
 			}
 
-			if svc.Spec.Type == "LoadBalancer" && len(svc.Status.LoadBalancer.Ingress) != 0 {
-				s.fs = filesystem.New(filepath.Join(config.Get().System.Data, s.ID()), s.DiskSpace(), s.Config().Egg.FileDenylist, svc.Status.LoadBalancer.Ingress[0].IP)
+			ip := svc.Spec.ClusterIP
+			port := config.Get().System.Sftp.Port
+
+			switch svc.Spec.Type {
+			case "LoadBalancer":
+				if len(svc.Status.LoadBalancer.Ingress) > 0 {
+					ip = svc.Status.LoadBalancer.Ingress[0].IP
+				}
+				if len(svc.Spec.Ports) > 0 {
+					port = int(svc.Spec.Ports[0].Port)
+				}
+			case "NodePort":
+				if len(svc.Spec.Ports) > 0 {
+					port = int(svc.Spec.Ports[0].NodePort)
+				}
 			}
+
+			s.fs.SetManager(fmt.Sprintf("%s:%v", ip, port))
 		}
 	}
 

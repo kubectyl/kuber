@@ -43,6 +43,14 @@ type ClusterConfiguration struct {
 	KeyFile string `json:"key_file" yaml:"key_file"`
 
 	CAFile string `json:"ca_file" yaml:"ca_file"`
+
+	Metrics string `json:"metrics" default:"metrics_api" yaml:"metrics"`
+
+	PrometheusAddress string `json:"prometheus_address" yaml:"prometheus_address"`
+
+	SnapshotClass string `json:"snapshot_class" yaml:"snapshot_class"`
+
+	ExternalTrafficPolicy string `json:"external_traffic_policy" default:"cluster" yaml:"external_traffic_policy"`
 }
 
 type ClusterNetworkConfiguration struct {

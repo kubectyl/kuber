@@ -40,7 +40,7 @@ type Pagination struct {
 // ServerConfigurationResponse holds the server configuration data returned from
 // the Panel. When a server process is started, Kuber communicates with the
 // Panel to fetch the latest build information as well as get all the details
-// needed to parse the given Egg.
+// needed to parse the given Rocket.
 //
 // This means we do not need to hit Kuber each time part of the server is
 // updated, and the Panel serves as the source of truth at all times. This also
@@ -163,11 +163,10 @@ type BackupPart struct {
 }
 
 type BackupRequest struct {
-	Checksum     string       `json:"checksum"`
-	ChecksumType string       `json:"checksum_type"`
-	Size         int64        `json:"size"`
-	Successful   bool         `json:"successful"`
-	Parts        []BackupPart `json:"parts"`
+	Snapcontent string       `json:"snapcontent"`
+	Size        int64        `json:"size"`
+	Successful  bool         `json:"successful"`
+	Parts       []BackupPart `json:"parts"`
 }
 
 type InstallStatusRequest struct {

@@ -1,7 +1,6 @@
 package filesystem
 
 import (
-	"fmt"
 	"path"
 	"sync"
 	"sync/atomic"
@@ -168,7 +167,6 @@ func (fs *Filesystem) directorySize(dir string) (int64, error) {
 
 	files, err := connection.sftpClient.ReadDir(dir)
 	if err != nil {
-		fmt.Println("directorySize Error: ", err)
 		return 0, err
 	}
 

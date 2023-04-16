@@ -4,12 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"log"
-	"net"
 	"sync"
 	"sync/atomic"
-	"time"
 
-	"github.com/kubectyl/kuber/config"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
@@ -85,49 +82,29 @@ func NewBasicSFTPManager(connString string, config *ssh.ClientConfig) *BasicSFTP
 	return manager
 }
 
-func isServerOnline(address string, timeout time.Duration) bool {
-	conn, err := net.DialTimeout("tcp", address, timeout)
-	if err != nil {
-		return false
-	}
-	defer conn.Close()
-	return true
-}
-
 func (m *BasicSFTPManager) handleReconnects(c *SFTPConn) {
 	closed := make(chan error, 1)
 	go func() {
 		closed <- c.sshConn.Wait()
 	}()
 
-	timeout := config.Get().System.Sftp.Timeout
-
 	select {
 	case <-c.shutdown:
 		c.sshConn.Close()
 		break
-	case res := <-closed:
-		// case <-closed:
-		fmt.Println("Connection closed, reconnecting: ", res)
+		// case res := <-closed:
+	case <-closed:
+		// fmt.Println("Connection closed, reconnecting: ", res)
 		conn, err := ssh.Dial("tcp", m.connString, m.sshConfig)
 		if err != nil {
-			fmt.Println("Failed to reconnect:" + err.Error())
-			if timeout > 0 {
-				time.Sleep(time.Second * time.Duration(timeout))
-			}
-			m.handleReconnects(c)
-			// c.sshConn.Close()
+			// fmt.Println("Failed to reconnect:" + err.Error())
+			m.Close()
 			return
 		}
 
 		sftpConn, err := sftp.NewClient(conn)
 		if err != nil {
-			fmt.Println("Failed to reconnect:" + err.Error())
-			if timeout > 0 {
-				time.Sleep(time.Second * time.Duration(timeout))
-			}
-			m.handleReconnects(c)
-			// c.sshConn.Close()
+			m.Close()
 			return
 		}
 
@@ -143,9 +120,6 @@ func (m *BasicSFTPManager) handleReconnects(c *SFTPConn) {
 
 // NewClient returns an SFTPConn and ensures the underlying connection reconnects on failure
 func (m *BasicSFTPManager) NewClient() (*SFTPConn, error) {
-	if online := isServerOnline(m.connString, time.Second*5); online != true {
-		return nil, nil
-	}
 	conn, err := ssh.Dial("tcp", m.connString, m.sshConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial ssh: %s", err)
@@ -170,17 +144,9 @@ func (m *BasicSFTPManager) NewClient() (*SFTPConn, error) {
 // is no connections, we create a new one instead.
 func (m *BasicSFTPManager) GetConnection() (*SFTPConn, error) {
 	if len(m.conns) > 0 {
-		if online := isServerOnline(m.connString, time.Second*5); online != true {
-			return nil, nil
-		}
 		return m.conns[0], nil
 	}
 	return m.NewClient()
-}
-
-// SetLogger allows you to override the logger
-func (m *BasicSFTPManager) SetLogger(logger *log.Logger) {
-	m.log = logger
 }
 
 // Close closes all connections managed by this manager
@@ -188,5 +154,6 @@ func (m *BasicSFTPManager) Close() error {
 	for _, c := range m.conns {
 		c.Close()
 	}
+	m.conns = nil
 	return nil
 }

@@ -47,6 +47,11 @@ type ProcessEnvironment interface {
 	// a server process for this specific server instance.
 	IsRunning(ctx context.Context) (bool, error)
 
+	// Performs an update of server resource limits without actually stopping the server
+	// process. This only executes if the environment supports it, otherwise it is
+	// a no-op.
+	// InSituUpdate() error
+
 	// Runs before the environment is started. If an error is returned starting will
 	// not occur, otherwise proceeds as normal.
 	OnBeforeStart(ctx context.Context) error
@@ -70,13 +75,15 @@ type ProcessEnvironment interface {
 	// is a no-op if the server is already stopped.
 	Terminate(ctx context.Context, signal os.Signal) error
 
-	// Destroys the environment removing any containers that were created (in Docker
+	// Destroys the environment removing any containers that were created (in Kubernetes
 	// environments at least).
 	Destroy() error
 
 	// Returns the exit state of the process. The first result is the exit code, the second
 	// determines if the process was killed by the system OOM killer.
 	ExitState() (uint32, bool, error)
+
+	CreateSFTP() error
 
 	// Creates the necessary environment for running the server process. For example,
 	// in the Docker environment create will create a new container instance for the

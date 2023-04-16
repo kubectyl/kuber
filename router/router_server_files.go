@@ -414,16 +414,16 @@ func postServerCompressFiles(c *gin.Context) {
 	}
 
 	// TODO: archive sftp files
-	// f, err := s.Filesystem().CompressFiles(data.RootPath, data.Files)
-	// if err != nil {
-	// 	middleware.CaptureAndAbort(c, err)
-	// 	return
-	// }
+	f, err := s.Filesystem().CompressFiles(data.RootPath, data.Files)
+	if err != nil {
+		middleware.CaptureAndAbort(c, err)
+		return
+	}
 
-	// c.JSON(http.StatusOK, &filesystem.Stat{
-	// 	FileInfo: f,
-	// 	Mimetype: "application/tar+gzip",
-	// })
+	c.JSON(http.StatusOK, &filesystem.Stat{
+		FileInfo: f,
+		Mimetype: "application/tar+gzip",
+	})
 }
 
 // postServerDecompressFiles receives the HTTP request and starts the process

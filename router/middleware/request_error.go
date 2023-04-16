@@ -123,7 +123,7 @@ func (re *RequestError) asFilesystemError() (int, string) {
 		return http.StatusNotFound, "The requested resources was not found on the system."
 	}
 	if filesystem.IsErrorCode(err, filesystem.ErrCodeDenylistFile) || strings.Contains(err.Error(), "filesystem: file access prohibited") {
-		return http.StatusForbidden, "This file cannot be modified: present in egg denylist."
+		return http.StatusForbidden, "This file cannot be modified: present in rocket denylist."
 	}
 	if filesystem.IsErrorCode(err, filesystem.ErrCodeIsDirectory) || strings.Contains(err.Error(), "filesystem: is a directory") {
 		return http.StatusBadRequest, "Cannot perform that action: file is a directory."

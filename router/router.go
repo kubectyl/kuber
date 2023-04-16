@@ -40,7 +40,6 @@ func Configure(m *wserver.Manager, client remote.Client) *gin.Engine {
 	}))
 
 	// These routes use signed URLs to validate access to the resource being requested.
-	router.GET("/download/backup", getDownloadBackup)
 	router.GET("/download/file", getDownloadFile)
 	router.POST("/upload/file", postServerUploadFiles)
 
@@ -102,11 +101,11 @@ func Configure(m *wserver.Manager, client remote.Client) *gin.Engine {
 			files.DELETE("/pull/:download", middleware.RemoteDownloadEnabled(), deleteServerPullRemoteFile)
 		}
 
-		backup := server.Group("/backup")
+		snapshot := server.Group("/snapshot")
 		{
-			backup.POST("", postServerBackup)
-			backup.POST("/:backup/restore", postServerRestoreBackup)
-			backup.DELETE("/:backup", deleteServerBackup)
+			snapshot.POST("", postServerBackup)
+			snapshot.POST("/:snapshot/restore", postServerRestoreBackup)
+			snapshot.DELETE("/:snapshot", deleteServerBackup)
 		}
 	}
 
