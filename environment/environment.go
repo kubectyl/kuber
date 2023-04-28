@@ -2,7 +2,6 @@ package environment
 
 import (
 	"context"
-	"os"
 	"time"
 
 	"github.com/kubectyl/kuber/events"
@@ -15,6 +14,8 @@ const (
 	DockerImagePullStarted   = "docker image pull started"
 	DockerImagePullStatus    = "docker image pull status"
 	DockerImagePullCompleted = "docker image pull completed"
+	DockerImagePullBackOff   = "docker image pull back-off"
+	DockerImagePullErr       = "docker image pull error"
 )
 
 const (
@@ -38,19 +39,23 @@ type ProcessEnvironment interface {
 	// events, only subscribe to them.
 	Events() *events.Bus
 
-	// Determines if the server instance exists. For example, in a docker environment
-	// this should confirm that the container is created and in a bootable state. In
-	// a basic CLI environment this can probably just return true right away.
+	// Determines if the server instance exists. Returns true or false.
 	Exists() (bool, error)
 
 	// IsRunning determines if the environment is currently active and running
 	// a server process for this specific server instance.
 	IsRunning(ctx context.Context) (bool, error)
 
+	// Create unique service port number
+	CreateServiceWithUniquePort() (int, error)
+
+	// Monitor changes and events of a Kubernetes pod
+	WatchPodEvents(ctx context.Context) error
+
 	// Performs an update of server resource limits without actually stopping the server
 	// process. This only executes if the environment supports it, otherwise it is
 	// a no-op.
-	// InSituUpdate() error
+	InSituUpdate() error
 
 	// Runs before the environment is started. If an error is returned starting will
 	// not occur, otherwise proceeds as normal.
@@ -73,7 +78,7 @@ type ProcessEnvironment interface {
 
 	// Terminate stops a running server instance using the provided signal. This function
 	// is a no-op if the server is already stopped.
-	Terminate(ctx context.Context, signal os.Signal) error
+	Terminate(ctx context.Context) error
 
 	// Destroys the environment removing any containers that were created (in Kubernetes
 	// environments at least).
@@ -83,13 +88,15 @@ type ProcessEnvironment interface {
 	// determines if the process was killed by the system OOM killer.
 	ExitState() (uint32, bool, error)
 
-	CreateSFTP() error
+	// Creates the pod for SFTP server.
+	CreateSFTP(ctx context.Context) error
 
 	// Creates the necessary environment for running the server process. For example,
 	// in the Docker environment create will create a new container instance for the
 	// server.
 	Create() error
 
+	// Creates the necessary services in Kubernetes for server.
 	CreateService() error
 
 	// Attach attaches to the server console environment and allows piping the output

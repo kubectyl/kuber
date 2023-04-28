@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"emperror.dev/errors"
+	errors2 "emperror.dev/errors"
 	"github.com/apex/log"
 	"k8s.io/client-go/kubernetes"
 
@@ -21,7 +21,7 @@ import (
 	"github.com/kubectyl/kuber/system"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -74,7 +74,7 @@ func (s *Server) install(reinstall bool) error {
 	// the panel once the installation is completed.
 	s.Events().Publish(InstallCompletedEvent, "")
 
-	return errors.WithStackIf(err)
+	return errors2.WithStackIf(err)
 }
 
 // Reinstall reinstalls a server's software by utilizing the installation script
@@ -84,13 +84,13 @@ func (s *Server) Reinstall() error {
 	if s.Environment.State() != environment.ProcessOfflineState {
 		s.Log().Debug("waiting for server instance to enter a stopped state")
 		if err := s.Environment.WaitForStop(s.Context(), time.Second*10, true); err != nil {
-			return errors.WrapIf(err, "install: failed to stop running environment")
+			return errors2.WrapIf(err, "install: failed to stop running environment")
 		}
 	}
 
 	s.Log().Info("syncing server state with remote source before executing re-installation process")
 	if err := s.Sync(); err != nil {
-		return errors.WrapIf(err, "install: failed to sync server state with Panel")
+		return errors2.WrapIf(err, "install: failed to sync server state with Panel")
 	}
 
 	return s.install(true)
@@ -168,12 +168,12 @@ func (ip *InstallationProcess) RemoveContainer() error {
 
 	for _, resource := range resources {
 		err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ip.Server.Context(), resource, metav1.DeleteOptions{})
-		if err != nil && !apierrors.IsNotFound(err) {
+		if err != nil && !errors.IsNotFound(err) {
 			return err
 		}
 
 		err = ip.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).Delete(ip.Server.Context(), resource, metav1.DeleteOptions{})
-		if err != nil && !apierrors.IsNotFound(err) {
+		if err != nil && !errors.IsNotFound(err) {
 			return err
 		}
 	}
@@ -188,7 +188,7 @@ func (ip *InstallationProcess) RemoveContainer() error {
 func (ip *InstallationProcess) Run() error {
 	ip.Server.Log().Debug("acquiring installation process lock")
 	if !ip.Server.installing.SwapIf(true) {
-		return errors.New("install: cannot obtain installation lock")
+		return errors2.New("install: cannot obtain installation lock")
 	}
 
 	// We now have an exclusive lock on this installation process. Ensure that whenever this
@@ -229,12 +229,12 @@ func (ip *InstallationProcess) writeScriptToDisk() error {
 	// Make sure the temp directory root exists before trying to make a directory within it. The
 	// ioutil.TempDir call expects this base to exist, it won't create it for you.
 	if err := os.MkdirAll(ip.tempDir(), 0o700); err != nil {
-		return errors.WithMessage(err, "could not create temporary directory for install process")
+		return errors2.WithMessage(err, "could not create temporary directory for install process")
 	}
 
 	f, err := os.OpenFile(filepath.Join(ip.tempDir(), "install.sh"), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
-		return errors.WithMessage(err, "failed to write server installation script to disk before mount")
+		return errors2.WithMessage(err, "failed to write server installation script to disk before mount")
 	}
 	defer f.Close()
 
@@ -260,17 +260,17 @@ func (ip *InstallationProcess) writeScriptToDisk() error {
 // the error is returned.
 func (ip *InstallationProcess) BeforeExecute() error {
 	if err := ip.writeScriptToDisk(); err != nil {
-		return errors.WithMessage(err, "failed to write installation script to disk")
+		return errors2.WithMessage(err, "failed to write installation script to disk")
 	}
 	var zero int64 = 0
 	policy := metav1.DeletePropagationForeground
 	if err := ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Delete(context.Background(), ip.Server.ID()+"-pvc", metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &policy}); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return errors.WithMessage(err, "failed to remove pvc before running installation")
+		if !errors.IsNotFound(err) {
+			return errors2.WithMessage(err, "failed to remove pvc before running installation")
 		}
 	}
 	if err := ip.RemoveContainer(); err != nil {
-		return errors.WithMessage(err, "failed to remove existing install container for server")
+		return errors2.WithMessage(err, "failed to remove existing install container for server")
 	}
 	return nil
 }
@@ -296,7 +296,7 @@ func (ip *InstallationProcess) AfterExecute(containerId string) error {
 	}
 	defer podLogs.Close()
 
-	if err != nil && !apierrors.IsNotFound(err) {
+	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
 
@@ -374,7 +374,7 @@ func (ip *InstallationProcess) Execute() (string, error) {
 	}
 
 	_, err = ip.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).Create(ctx, configmap, metav1.CreateOptions{})
-	if err != nil && !apierrors.IsAlreadyExists(err) {
+	if err != nil && !errors.IsAlreadyExists(err) {
 		ip.Server.Log().WithField("error", err).Warn("failed to create configmap")
 	}
 
@@ -464,7 +464,7 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		},
 	}
 
-	if len(ip.Server.Config().NodeSelectors) > 1 {
+	if len(ip.Server.Config().NodeSelectors) > 0 {
 		pod.Spec.NodeSelector = map[string]string{}
 
 		// Loop through the map and create a node selector string
@@ -575,7 +575,7 @@ func (ip *InstallationProcess) StreamOutput(ctx context.Context, id string) erro
 	defer podLogs.Close()
 
 	err = system.ScanReader(podLogs, ip.Server.Sink(system.InstallSink).Push)
-	if err != nil && !errors.Is(err, context.Canceled) {
+	if err != nil && !errors2.Is(err, context.Canceled) {
 		ip.Server.Log().WithFields(log.Fields{"pod_id": id, "error": err}).Warn("error processing install output lines")
 	}
 	return nil

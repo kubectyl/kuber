@@ -12,7 +12,7 @@ import (
 	snapshotclientset "github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned"
 	corev1 "k8s.io/api/core/v1"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -47,7 +47,7 @@ func LocateLocal(snapshotClient *snapshotclientset.Clientset, client remote.Clie
 // Remove removes a snapshot from the system.
 func (b *LocalBackup) Remove() error {
 	err := b.snapshotClient.SnapshotV1().VolumeSnapshots(config.Get().Cluster.Namespace).Delete(context.Background(), b.Identifier(), metav1.DeleteOptions{})
-	if err != nil && apierrors.IsNotFound(err) {
+	if err != nil && errors.IsNotFound(err) {
 		return nil
 	}
 
@@ -160,13 +160,13 @@ func (b *LocalBackup) Restore(ctx context.Context, sid string, disk int64, callb
 			GracePeriodSeconds: &zero,
 			PropagationPolicy:  &policy,
 		})
-		if err != nil && !apierrors.IsNotFound(err) {
+		if err != nil && !errors.IsNotFound(err) {
 			return err
 		}
 
 		err = wait.PollImmediate(time.Second, 5*time.Minute, func() (bool, error) {
 			_, err := b.clientset.CoreV1().Pods(cfg.Namespace).Get(context.Background(), sid, metav1.GetOptions{})
-			if err != nil && !apierrors.IsNotFound(err) {
+			if err != nil && !errors.IsNotFound(err) {
 				return false, err
 			}
 			return true, nil
@@ -179,13 +179,13 @@ func (b *LocalBackup) Restore(ctx context.Context, sid string, disk int64, callb
 			GracePeriodSeconds: &zero,
 			PropagationPolicy:  &policy,
 		})
-		if err != nil && !apierrors.IsNotFound(err) {
+		if err != nil && !errors.IsNotFound(err) {
 			return err
 		}
 
 		err = wait.PollImmediate(time.Second, 5*time.Minute, func() (bool, error) {
 			_, err := b.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Get(context.Background(), sid+"-pvc", metav1.GetOptions{})
-			if err != nil && !apierrors.IsNotFound(err) {
+			if err != nil && !errors.IsNotFound(err) {
 				return false, err
 			}
 			return true, nil

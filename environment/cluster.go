@@ -14,7 +14,7 @@ import (
 	"path"
 	"path/filepath"
 
-	"emperror.dev/errors"
+	errors2 "emperror.dev/errors"
 	"github.com/apex/log"
 	"github.com/kubectyl/kuber/config"
 	"gopkg.in/yaml.v2"
@@ -22,7 +22,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -110,7 +110,7 @@ func CreateSftpConfigmap() error {
 	}
 
 	if err := os.MkdirAll(tempDir, 0o700); err != nil {
-		return errors.WithMessage(err, "could not create temporary directory for sftp configmap")
+		return errors2.WithMessage(err, "could not create temporary directory for sftp configmap")
 	}
 
 	err = os.WriteFile(tempFile, yamlData, 0644)
@@ -143,7 +143,7 @@ func CreateSftpConfigmap() error {
 	log.WithField("configmap", "sftp").Info("checking and updating sftp configmap")
 	_, errG := client.Create(context.TODO(), configmap, metav1.CreateOptions{})
 	if errG != nil {
-		if apierrors.IsAlreadyExists(errG) {
+		if errors.IsAlreadyExists(errG) {
 			cm, err := client.Get(context.TODO(), configmap.Name, metav1.GetOptions{})
 			if err != nil {
 				return err
@@ -186,17 +186,17 @@ func CreateSftpSecret() error {
 	client := c.CoreV1().Secrets(config.Get().Cluster.Namespace)
 
 	sec, err := client.Get(context.Background(), "ed25519", metav1.GetOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
+	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
 
-	if apierrors.IsNotFound(err) {
+	if errors.IsNotFound(err) {
 		if _, err := os.Stat(PrivateKeyPath()); os.IsNotExist(err) {
 			if err := generateED25519PrivateKey(); err != nil {
 				return err
 			}
 		} else if err != nil {
-			return errors.Wrap(err, "sftp: could not stat private key file")
+			return errors2.Wrap(err, "sftp: could not stat private key file")
 		}
 
 		fileContents, err := os.ReadFile(PrivateKeyPath())
@@ -208,12 +208,12 @@ func CreateSftpSecret() error {
 			"id_ed25519": fileContents,
 		}
 
-		if _, err = client.Create(context.Background(), secret, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		if _, err = client.Create(context.Background(), secret, metav1.CreateOptions{}); err != nil && !errors.IsAlreadyExists(err) {
 			return err
 		}
 	} else {
 		if err := os.MkdirAll(path.Dir(PrivateKeyPath()), 0o755); err != nil {
-			return errors.Wrap(err, "sftp: could not create internal sftp data directory")
+			return errors2.Wrap(err, "sftp: could not create internal sftp data directory")
 		}
 
 		privateKeyFile, err := os.OpenFile(PrivateKeyPath(), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
@@ -246,23 +246,23 @@ func CreateSftpSecret() error {
 func generateED25519PrivateKey() error {
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return errors.Wrap(err, "sftp: failed to generate ED25519 private key")
+		return errors2.Wrap(err, "sftp: failed to generate ED25519 private key")
 	}
 	if err := os.MkdirAll(path.Dir(PrivateKeyPath()), 0o755); err != nil {
-		return errors.Wrap(err, "sftp: could not create internal sftp data directory")
+		return errors2.Wrap(err, "sftp: could not create internal sftp data directory")
 	}
 	o, err := os.OpenFile(PrivateKeyPath(), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		return errors.WithStack(err)
+		return errors2.WithStack(err)
 	}
 	defer o.Close()
 
 	b, err := x509.MarshalPKCS8PrivateKey(priv)
 	if err != nil {
-		return errors.Wrap(err, "sftp: failed to marshal private key into bytes")
+		return errors2.Wrap(err, "sftp: failed to marshal private key into bytes")
 	}
 	if err := pem.Encode(o, &pem.Block{Type: "PRIVATE KEY", Bytes: b}); err != nil {
-		return errors.Wrap(err, "sftp: failed to write ED25519 private key to disk")
+		return errors2.Wrap(err, "sftp: failed to write ED25519 private key to disk")
 	}
 	return nil
 }

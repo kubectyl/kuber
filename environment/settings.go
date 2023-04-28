@@ -34,16 +34,18 @@ type Mount struct {
 // Limits is the build settings for a given server that impact docker container
 // creation and resource limits for a server instance.
 type Limits struct {
-	// The total amount of memory in megabytes that this server is allowed to
-	// use on the host system.
+	HugepagesRequest int64 `json:"hugepages_request"`
+
+	HugepagesLimit int64 `json:"hugepages_limit"`
+
+	// Minimum amount of resources that a container needs to run.
+	MemoryRequest int64 `json:"memory_request"`
+
+	// Maximum amount of resources that a container is allowed to use.
 	MemoryLimit int64 `json:"memory_limit"`
 
-	// The amount of additional swap space to be provided to a container instance.
-	Swap int64 `json:"swap"`
-
-	// The relative weight for IO operations in a container. This is relative to other
-	// containers on the system and should be a value between 10 and 1000.
-	IoWeight uint16 `json:"io_weight"`
+	// Minimum amount of resources that a container needs to run.
+	CpuRequest int64 `json:"cpu_request"`
 
 	// The percentage of CPU that this instance is allowed to consume relative to
 	// the host. A value of 200% represents complete utilization of two cores. This
@@ -52,11 +54,6 @@ type Limits struct {
 
 	// The amount of disk space in megabytes that a server is allowed to use.
 	DiskSpace int64 `json:"disk_space"`
-
-	// Sets which CPU threads can be used by the docker instance.
-	Threads string `json:"threads"`
-
-	OOMDisabled bool `json:"oom_disabled"`
 }
 
 // ConvertedCpuLimit converts the CPU limit for a server build into a number
@@ -82,26 +79,12 @@ func (l Limits) BoundedMemoryLimit() int64 {
 	return int64(math.Round(float64(l.MemoryLimit) * l.MemoryOverheadMultiplier() * 1_000_000))
 }
 
-// ConvertedSwap returns the amount of swap available as a total in bytes. This
-// is returned as the amount of memory available to the server initially, PLUS
-// the amount of additional swap to include which is the format used by Docker.
-func (l Limits) ConvertedSwap() int64 {
-	if l.Swap < 0 {
-		return -1
-	}
-
-	return (l.Swap * 1_000_000) + l.BoundedMemoryLimit()
-}
-
 // AsContainerResources returns the available resources for a container in a format
 // that Docker understands.
 func (l Limits) AsContainerResources() container.Resources {
 	resources := container.Resources{
 		Memory:            l.BoundedMemoryLimit(),
 		MemoryReservation: l.MemoryLimit * 1_000_000,
-		MemorySwap:        l.ConvertedSwap(),
-		BlkioWeight:       l.IoWeight,
-		OomKillDisable:    &l.OOMDisabled,
 	}
 
 	// If the CPU Limit is not set, don't send any of these fields through. Providing
@@ -112,12 +95,6 @@ func (l Limits) AsContainerResources() container.Resources {
 		resources.CPUQuota = l.CpuLimit * 1_000
 		resources.CPUPeriod = 100_000
 		resources.CPUShares = 1024
-	}
-
-	// Similar to above, don't set the specific assigned CPUs if we didn't actually limit
-	// the server to any of them.
-	if l.Threads != "" {
-		resources.CpusetCpus = l.Threads
 	}
 
 	return resources

@@ -3,6 +3,7 @@ package router
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -74,11 +75,24 @@ func getServerFileContents(c *gin.Context) {
 	}
 }
 
+type httpError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("%d: %s", e.Code, e.Message)
+}
+
 // Returns the contents of a directory for a server.
 func getServerListDirectory(c *gin.Context) {
 	s := ExtractServer(c)
 	dir := c.Query("directory")
 	if stats, err := s.Filesystem().ListDirectory(dir); err != nil {
+		if strings.Contains(err.Error(), "processing error") {
+			c.AbortWithStatus(http.StatusServiceUnavailable)
+			return
+		}
 		middleware.CaptureAndAbort(c, err)
 	} else {
 		c.JSON(http.StatusOK, stats)

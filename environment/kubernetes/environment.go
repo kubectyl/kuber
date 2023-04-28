@@ -4,13 +4,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
+	"strings"
 	"sync"
+	"time"
 
-	"emperror.dev/errors"
+	errors2 "emperror.dev/errors"
 	"github.com/apex/log"
 	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
@@ -87,8 +91,8 @@ func New(id string, m *Metadata, c *environment.Configuration) (*Environment, er
 }
 
 func (e *Environment) GetServiceDetails() []v1.Service {
-	list, err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).List(context.TODO(), metav1.ListOptions{
-		LabelSelector: "uuid=" + e.Id,
+	list, err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).List(context.Background(), metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("uuid=%s,Service=Kubectyl", e.Id),
 	})
 	if err != nil {
 		return nil
@@ -102,10 +106,10 @@ func (e *Environment) log() *log.Entry {
 }
 
 func (e *Environment) Type() string {
-	return "docker"
+	return "kubernetes"
 }
 
-// SetStream sets the current stream value from the Docker client. If a nil
+// SetStream sets the current stream value from the Kubernetes remotecommand.Executor. If a nil
 // value is provided we assume that the stream is no longer operational and the
 // instance is effectively offline.
 func (e *Environment) SetStream(s remotecommand.Executor) {
@@ -133,16 +137,21 @@ func (e *Environment) Events() *events.Bus {
 // name as the lookup parameter in addition to the longer ID auto-assigned when
 // the container is created.
 func (e *Environment) Exists() (bool, error) {
-	_, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.Background(), e.Id, metav1.GetOptions{})
+	p, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.Background(), e.Id, metav1.GetOptions{})
 	if err != nil {
-		// If this error is because the container instance wasn't found via Docker we
+		// If this error is because the pod instance wasn't found via Kubernetes we
 		// can safely ignore the error and just return false.
-		if apierrors.IsNotFound(err) {
+		if errors.IsNotFound(err) {
 			return false, nil
 		}
 		return false, err
 	}
-	return true, nil
+	for _, container := range p.Spec.Containers {
+		if container.Name == "process" && p.Status.ContainerStatuses != nil {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // IsRunning determines if the server's process container is currently running.
@@ -166,6 +175,79 @@ func (e *Environment) IsRunning(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
+func (e *Environment) CreateServiceWithUniquePort() (int, error) {
+	// Get the list of all services in the namespace
+	services, err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).List(context.Background(), metav1.ListOptions{
+		LabelSelector: "Service=Kubectyl",
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	// Generate a random port number between 30000 and 32767
+	rand.Seed(int64(time.Now().Nanosecond()))
+	port := rand.Intn(2768) + 30000
+
+	// Check if the port is already in use by another service
+	for _, service := range services.Items {
+		for _, svcPort := range service.Spec.Ports {
+			if svcPort.Port == int32(port) {
+				// If the port is already in use, generate a new port and try again
+				return e.CreateServiceWithUniquePort()
+			}
+		}
+	}
+
+	return port, nil
+}
+
+func (e *Environment) WatchPodEvents(ctx context.Context) error {
+	watcher, err := e.client.CoreV1().Events(config.Get().Cluster.Namespace).Watch(ctx, metav1.ListOptions{
+		FieldSelector: fmt.Sprintf("involvedObject.kind=Pod,involvedObject.name=%s", e.Id),
+		Watch:         true,
+	})
+	if err != nil {
+		return err
+	}
+	defer watcher.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case ev := <-watcher.ResultChan():
+			switch ev.Type {
+			case watch.Error:
+				continue
+			case watch.Added, watch.Modified:
+				event, ok := ev.Object.(*v1.Event)
+				if !ok {
+					continue
+				}
+				if event.InvolvedObject.Kind == "Pod" &&
+					event.InvolvedObject.Name == e.Id &&
+					event.InvolvedObject.FieldPath == "spec.containers{process}" {
+					if event.Type == "Warning" && strings.Contains(event.Message, "Failed to pull image") {
+						e.Events().Publish(environment.DockerImagePullErr, event.Message)
+					}
+					switch event.Reason {
+					case "Pulling":
+						e.Events().Publish(environment.DockerImagePullStarted, event.Message)
+					case "Pulled":
+						if strings.Contains(event.Message, "already present") {
+							e.Events().Publish(environment.DockerImagePullStatus, event.Message)
+						} else {
+							e.Events().Publish(environment.DockerImagePullCompleted, event.Message)
+						}
+					case "BackOff":
+						e.Events().Publish(environment.DockerImagePullBackOff, event.Message)
+					}
+				}
+			}
+		}
+	}
+}
+
 // ExitState returns the container exit state, the exit code and whether or not
 // the container was killed by the OOM killer.
 func (e *Environment) ExitState() (uint32, bool, error) {
@@ -180,7 +262,7 @@ func (e *Environment) ExitState() (uint32, bool, error) {
 		// so that's a mystery that will have to go unsolved.
 		//
 		// @see https://github.com/pterodactyl/panel/issues/2003
-		if apierrors.IsNotFound(err) {
+		if errors.IsNotFound(err) {
 			return 1, false, nil
 		}
 		return 0, false, err
@@ -234,7 +316,7 @@ func (e *Environment) SetState(state string) {
 		state != environment.ProcessStartingState &&
 		state != environment.ProcessRunningState &&
 		state != environment.ProcessStoppingState {
-		panic(errors.New(fmt.Sprintf("invalid server state received: %s", state)))
+		panic(errors2.New(fmt.Sprintf("invalid server state received: %s", state)))
 	}
 
 	// Emit the event to any listeners that are currently registered.

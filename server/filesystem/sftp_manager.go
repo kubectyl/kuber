@@ -122,7 +122,8 @@ func (m *BasicSFTPManager) handleReconnects(c *SFTPConn) {
 func (m *BasicSFTPManager) NewClient() (*SFTPConn, error) {
 	conn, err := ssh.Dial("tcp", m.connString, m.sshConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to dial ssh: %s", err)
+		// return nil, fmt.Errorf("failed to dial ssh: %s", err)
+		return nil, nil
 	}
 
 	sftpConn, err := sftp.NewClient(conn)

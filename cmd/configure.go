@@ -23,12 +23,12 @@ var configureArgs struct {
 	PanelURL      string
 	Token         string
 	ConfigPath    string
-	Node          string
+	Cluster       string
 	Override      bool
 	AllowInsecure bool
 }
 
-var nodeIdRegex = regexp.MustCompile(`^(\d+)$`)
+var clusterIdRegex = regexp.MustCompile(`^(\d+)$`)
 
 var configureCmd = &cobra.Command{
 	Use:   "configure",
@@ -38,10 +38,10 @@ var configureCmd = &cobra.Command{
 
 func init() {
 	configureCmd.PersistentFlags().StringVarP(&configureArgs.PanelURL, "panel-url", "p", "", "The base URL for this daemon's panel")
-	configureCmd.PersistentFlags().StringVarP(&configureArgs.Token, "token", "t", "", "The API key to use for fetching node information")
-	configureCmd.PersistentFlags().StringVarP(&configureArgs.Node, "node", "n", "", "The ID of the node which will be connected to this daemon")
+	configureCmd.PersistentFlags().StringVarP(&configureArgs.Token, "token", "t", "", "The API key to use for fetching cluster information")
+	configureCmd.PersistentFlags().StringVarP(&configureArgs.Cluster, "cluster", "n", "", "The ID of the cluster which will be connected to this daemon")
 	configureCmd.PersistentFlags().StringVarP(&configureArgs.ConfigPath, "config-path", "c", config.DefaultLocation, "The path where the configuration file should be made")
-	configureCmd.PersistentFlags().BoolVar(&configureArgs.Override, "override", false, "Set to true to override an existing configuration for this node")
+	configureCmd.PersistentFlags().BoolVar(&configureArgs.Override, "override", false, "Set to true to override an existing configuration for this cluster")
 	configureCmd.PersistentFlags().BoolVar(&configureArgs.AllowInsecure, "allow-insecure", false, "Set to true to disable certificate checking")
 }
 
@@ -55,7 +55,7 @@ func configureCmdRun(cmd *cobra.Command, args []string) {
 	if _, err := os.Stat(configureArgs.ConfigPath); err == nil && !configureArgs.Override {
 		survey.AskOne(&survey.Confirm{Message: "Override existing configuration file"}, &configureArgs.Override)
 		if !configureArgs.Override {
-			fmt.Println("Aborting process; a configuration file already exists for this node.")
+			fmt.Println("Aborting process; a configuration file already exists for this cluster.")
 			os.Exit(1)
 		}
 	} else if err != nil && !os.IsNotExist(err) {
@@ -92,13 +92,13 @@ func configureCmdRun(cmd *cobra.Command, args []string) {
 		})
 	}
 
-	if configureArgs.Node == "" {
+	if configureArgs.Cluster == "" {
 		questions = append(questions, &survey.Question{
-			Name:   "Node",
-			Prompt: &survey.Input{Message: "Node ID: "},
+			Name:   "Cluster",
+			Prompt: &survey.Input{Message: "Cluster ID: "},
 			Validate: func(ans interface{}) error {
 				if str, ok := ans.(string); ok {
-					if !nodeIdRegex.Match([]byte(str)) {
+					if !clusterIdRegex.Match([]byte(str)) {
 						return fmt.Errorf("please provide a valid authentication token")
 					}
 				}
@@ -168,7 +168,7 @@ func getRequest() (*http.Request, error) {
 		panic(err)
 	}
 
-	u.Path = path.Join(u.Path, fmt.Sprintf("api/application/nodes/%s/configuration", configureArgs.Node))
+	u.Path = path.Join(u.Path, fmt.Sprintf("api/application/clusters/%s/configuration", configureArgs.Cluster))
 
 	r, err := http.NewRequest(http.MethodGet, u.String(), nil)
 	if err != nil {

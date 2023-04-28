@@ -3,7 +3,7 @@ package cmd
 import (
 	"context"
 	"crypto/tls"
-	"errors"
+	errors2 "errors"
 	"fmt"
 	log2 "log"
 	"net/http"
@@ -35,7 +35,8 @@ import (
 	"github.com/kubectyl/kuber/server"
 	"github.com/kubectyl/kuber/system"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 var (
@@ -191,22 +192,19 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 				st = state
 			}
 
-			// Use a timed context here to avoid booting issues where Docker hangs for a
-			// specific container that would cause Kuber to be un-bootable until the entire
+			// Use a timed context here to avoid booting issues where Kubernetes hangs for a
+			// specific pod that would cause Kuber to be un-bootable until the entire
 			// machine is rebooted. It is much better for us to just have a single failed
 			// server instance than an entire offline node.
-			//
-			// @see https://github.com/pterodactyl/panel/issues/2475
-			// @see https://github.com/pterodactyl/panel/issues/3358
 			ctx, cancel := context.WithTimeout(cmd.Context(), time.Second*30)
 			defer cancel()
 
 			r, err := s.Environment.IsRunning(ctx)
-			// We ignore missing containers because we don't want to actually block booting of kuber at this
+			// We ignore missing pods because we don't want to actually block booting of kuber at this
 			// point. If we didn't do this, and you pruned all the images and then started kuber you could
 			// end up waiting a long period of time for all the images to be re-pulled on Kuber boot rather
 			// than when the server itself is started.
-			if err != nil && !apierrors.IsNotFound(err) {
+			if err != nil && !errors.IsNotFound(err) {
 				s.Log().WithField("error", err).Error("error checking server environment status")
 			}
 
@@ -232,6 +230,21 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 				s.Log().Info("detected server is running, re-attaching to process...")
 
 				s.Environment.SetState(environment.ProcessRunningState)
+
+				ctx, cancel := context.WithCancel(context.Background())
+				go func(ctx context.Context) {
+					err := wait.PollInfinite(time.Second, func() (bool, error) {
+						if running, err := s.Environment.IsRunning(ctx); !running {
+							cancel()
+							return true, err
+						}
+						return false, err
+					})
+					if err != nil {
+						s.Environment.SetState(environment.ProcessOfflineState)
+					}
+				}(ctx)
+
 				if err := s.Environment.Attach(ctx); err != nil {
 					s.Log().WithField("error", err).Warn("failed to attach to running server environment")
 				}
@@ -241,9 +254,9 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 				// state being tracked.
 				s.Environment.SetState(environment.ProcessOfflineState)
 
-				// Avoid blocking whole process
+				// we use goroutine to avoid blocking whole process
 				go func() {
-					if err := s.Environment.CreateSFTP(); err != nil {
+					if err := s.Environment.CreateSFTP(s.Context()); err != nil {
 						log.WithField("error", err).Warn("failed to create server SFTP pod")
 					}
 				}()
@@ -384,7 +397,7 @@ func initConfig() {
 	}
 	err := config.FromFile(configPath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if errors2.Is(err, os.ErrNotExist) {
 			exitWithConfigurationNotice()
 		}
 		log2.Fatalf("cmd/root: error while reading configuration file: %s", err)

@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	"emperror.dev/errors"
@@ -190,7 +189,7 @@ func (s *Server) HandlePowerAction(action PowerAction, waitSeconds ...int) error
 
 		return s.Environment.Start(s.Context())
 	case PowerActionTerminate:
-		return s.Environment.Terminate(s.Context(), os.Kill)
+		return s.Environment.Terminate(s.Context())
 	}
 
 	return errors.New("attempting to handle unknown power action")
@@ -214,16 +213,9 @@ func (s *Server) onBeforeStart() error {
 	// and process resource limits are correctly applied.
 	s.SyncWithEnvironment()
 
-	// If a server has unlimited disk space, we don't care enough to block the startup to check remaining.
-	// However, we should trigger a size anyway, as it'd be good to kick it off for other processes.
-
-	// if s.DiskSpace() <= 0 {
-	// 	s.Filesystem().HasSpaceAvailable(true)
-	// } else {
-	// 	s.PublishConsoleOutputFromDaemon("Checking server disk space usage, this could take a few seconds...")
-	// 	if err := s.Filesystem().HasSpaceErr(false); err != nil {
-	// 		return err
-	// 	}
+	s.PublishConsoleOutputFromDaemon("Checking server disk space usage, this could take a few seconds...")
+	// if err := s.Filesystem().HasSpaceErr(false); err != nil {
+	// 	return err
 	// }
 
 	// Update the configuration files defined for the server before beginning the boot process.
@@ -232,20 +224,19 @@ func (s *Server) onBeforeStart() error {
 	// we don't need to actively do anything about it at this point, worse comes to worst the
 	// server starts in a weird state and the user can manually adjust.
 	s.PublishConsoleOutputFromDaemon("Updating process configuration files...")
-	// s.Log().Debug("updating server configuration files...")
+	s.Log().Debug("updating server configuration files...")
 	// s.UpdateConfigurationFiles()
-	// s.Log().Debug("updated server configuration files")
+	s.Log().Debug("updated server configuration files")
 
-	// if config.Get().System.CheckPermissionsOnBoot {
-	// s.PublishConsoleOutputFromDaemon("Ensuring file permissions are set correctly, this could take a few seconds...")
+	if config.Get().System.CheckPermissionsOnBoot {
+		s.PublishConsoleOutputFromDaemon("Ensuring file permissions are set correctly, this could take a few seconds...")
 
-	// Ensure all the server file permissions are set correctly before booting the process.
-
-	// s.Log().Debug("chowning server root directory...")
-	// if err := s.Filesystem().Chown("/"); err != nil {
-	// 	return errors.WithMessage(err, "failed to chown root server directory during pre-boot process")
-	// }
-	// }
+		// Ensure all the server file permissions are set correctly before booting the process.
+		s.Log().Debug("chowning server root directory...")
+		// if err := s.Filesystem().Chown("/"); err != nil {
+		// 	return errors.WithMessage(err, "failed to chown root server directory during pre-boot process")
+		// }
+	}
 
 	s.Log().Info("completed server preflight, starting boot process...")
 	return nil

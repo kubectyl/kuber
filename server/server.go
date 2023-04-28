@@ -309,7 +309,7 @@ func (s *Server) OnStateChange() {
 
 // IsRunning determines if the server state is running or not. This is different
 // from the environment state, it is simply the tracked state from this daemon
-// instance, and not the response from Docker.
+// instance, and not the response from Kubernetes.
 func (s *Server) IsRunning() bool {
 	st := s.Environment.State()
 

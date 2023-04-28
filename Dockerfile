@@ -14,15 +14,18 @@ RUN CGO_ENABLED=0 go build \
     -o kuber \
     kuber.go
 # RUN echo "ID=\"distroless\"" > /etc/os-release
-# RUN echo "Europe/Bucharest" > /etc/timezone
 
 # Stage 2 (Final)
 # FROM gcr.io/distroless/static:latest
 FROM busybox:latest
-COPY --from=builder /etc/os-release /etc/os-release
-# COPY --from=builder /etc/timezone /etc/timezone
 
+ENV TZ=UTC
+ENV SSL_CERT_DIR=/etc/ssl/certs
+
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /etc/os-release /etc/os-release
 COPY --from=builder /app/kuber /usr/bin/
+
 CMD [ "/usr/bin/kuber", "--config", "/etc/kubectyl/config.yml" ]
 
 EXPOSE 8080

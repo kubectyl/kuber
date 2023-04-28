@@ -380,9 +380,13 @@ func (h *Handler) HandleInbound(ctx context.Context, m Message) error {
 		}
 	case SendServerLogsEvent:
 		{
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
-			defer cancel()
-			if running, _ := h.server.Environment.IsRunning(ctx); !running {
+			// ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+			// defer cancel()
+			// if running, _ := h.server.Environment.IsRunning(ctx); !running {
+			// 	return nil
+			// }
+
+			if running, _ := h.server.Environment.Exists(); !running {
 				return nil
 			}
 

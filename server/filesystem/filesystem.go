@@ -593,22 +593,22 @@ func (fo *fileOpener) open(path string, flags int, perm os.FileMode) (*os.File, 
 // ListDirectory lists the contents of a given directory and returns stat
 // information about each file and folder within it.
 func (fs *Filesystem) ListDirectory(p string) ([]Stat, error) {
-	// cleaned, err := fs.SafePath(p)
-	// if err != nil {
-	// 	return nil, err
-	// }
+	cleaned, err := fs.SafePath(p)
+	if err != nil {
+		return nil, err
+	}
 
 	connection, err := fs.manager.GetConnection()
 	if connection == nil || err != nil {
-		return make([]Stat, 0), err
+		return nil, errors.New("processing error")
 	}
 
 	// Check if the SFTP client connection is valid
 	if connection.sftpClient == nil {
-		return nil, errors.New("SFTP client connection is invalid")
+		return nil, errors.New("client connection is invalid")
 	}
 
-	files, err := connection.sftpClient.ReadDir(p)
+	files, err := connection.sftpClient.ReadDir(cleaned)
 	if err != nil {
 		return nil, err
 	}
@@ -631,9 +631,9 @@ func (fs *Filesystem) ListDirectory(p string) ([]Stat, error) {
 			var m *mimetype.MIME
 			d := "inode/directory"
 			if !f.IsDir() {
-				cleanedp := filepath.Join(p, f.Name())
+				cleanedp := filepath.Join(cleaned, f.Name())
 				if f.Mode()&os.ModeSymlink != 0 {
-					cleanedp = filepath.Join(p, f.Name())
+					cleanedp = filepath.Join(cleaned, f.Name())
 				}
 
 				// Don't try to detect the type on a pipe — this will just hang the application and
@@ -641,7 +641,7 @@ func (fs *Filesystem) ListDirectory(p string) ([]Stat, error) {
 				//
 				// @see https://github.com/pterodactyl/panel/issues/4059
 				if cleanedp != "" && f.Mode()&os.ModeNamedPipe == 0 {
-					file, err := connection.sftpClient.Open(filepath.Join(p, f.Name()))
+					file, err := connection.sftpClient.Open(filepath.Join(cleaned, f.Name()))
 					if err != nil {
 						panic(fmt.Errorf("Error SFTP Open: %s", err))
 					}

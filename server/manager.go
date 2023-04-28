@@ -199,7 +199,7 @@ func (m *Manager) InitServer(data remote.ServerConfigurationResponse) (*Server, 
 	// Initialize the filesystem here so that we don't receive panic later
 	s.fs = filesystem.New(filepath.Join(config.Get().System.Data, s.ID()), s.DiskSpace(), s.Config().Rocket.FileDenylist, "")
 
-	// Right now we only support a Docker based environment, so I'm going to hard code
+	// Right now we only support a Kubernetes based environment, so I'm going to hard code
 	// this logic in. When we're ready to support other environment we'll need to make
 	// some modifications here, obviously.
 	settings := environment.Settings{

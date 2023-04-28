@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -11,11 +12,14 @@ import (
 	"strings"
 	"time"
 
-	"emperror.dev/errors"
+	errors2 "emperror.dev/errors"
 	"github.com/apex/log"
 	"github.com/docker/docker/api/types/mount"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
@@ -26,11 +30,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-var ErrNotAttached = errors.Sentinel("not attached to instance")
+var ErrNotAttached = errors2.Sentinel("not attached to instance")
 
 // A custom console writer that allows us to keep a function blocked until the
 // given stream is properly closed. This does nothing special, only exists to
@@ -84,14 +87,14 @@ func (e *Environment) Attach(ctx context.Context) error {
 		// function is to avoid a hang situation when trying to attach to a container.
 		pollCtx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		// defer func() {
-		// e.SetState(environment.ProcessOfflineState)
-		// e.SetStream(nil)
-		// }()
+		defer func() {
+			e.SetState(environment.ProcessOfflineState)
+			e.SetStream(nil)
+		}()
 
 		go func() {
 			if err := e.pollResources(pollCtx); err != nil {
-				if !errors.Is(err, context.Canceled) {
+				if !errors2.Is(err, context.Canceled) {
 					e.log().WithField("error", err).Error("error during environment resource polling")
 				} else {
 					e.log().Warn("stopping server resource polling: context canceled")
@@ -122,30 +125,71 @@ func (e *Environment) Attach(ctx context.Context) error {
 	return nil
 }
 
-// func (e *Environment) InSituUpdate() error {
-// 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
-// 	defer cancel()
+func (e *Environment) InSituUpdate() error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
 
-// if _, err := e.ContainerInspect(ctx); err != nil {
-// If the container doesn't exist for some reason there really isn't anything
-// we can do to fix that in this process (it doesn't make sense at least). In those
-// cases just return without doing anything since we still want to save the configuration
-// to the disk.
-//
-// We'll let a boot process make modifications to the container if needed at this point.
-// if apierrors.(err) {
-// 	return nil
-// }
-// return errors.Wrap(err, "environment/kubernetes: could not inspect container")
-// }
+	pod, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(ctx, e.Id, metav1.GetOptions{})
+	if err != nil {
+		// If the pod doesn't exist for some reason there really isn't anything
+		// we can do to fix that in this process (it doesn't make sense at least). In those
+		// cases just return without doing anything since we still want to save the configuration
+		// to the disk.
 
-// if _, err := e.client.ContainerUpdate(ctx, e.Id, container.UpdateConfig{
-// 	Resources: e.Configuration.Limits().AsContainerResources(),
-// }); err != nil {
-// 	return errors.Wrap(err, "environment/kubernetes: could not update pod")
-// }
-// return nil
-// }
+		// We'll let a boot process make modifications to the pod if needed at this point.
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return errors2.Wrap(err, "environment/kubernetes: could not inspect pod")
+	}
+
+	resources := e.Configuration.Limits()
+
+	originalPodBytes, err := json.Marshal(pod)
+	if err != nil {
+		return err
+	}
+
+	modifiedPodBytes, err := json.Marshal(&v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pod.Name,
+			Namespace: pod.Namespace,
+		},
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{
+					Name: pod.Spec.Containers[0].Name,
+					Resources: v1.ResourceRequirements{
+						Limits: v1.ResourceList{
+							"cpu":    *resource.NewMilliQuantity(10*resources.CpuLimit, resource.DecimalSI),
+							"memory": *resource.NewQuantity(resources.MemoryLimit*1_000_000, resource.BinarySI),
+							// "hugepages-2Mi":       *resource.NewQuantity(1<<30, resource.BinarySI),
+						},
+						Requests: v1.ResourceList{
+							"cpu":    *resource.NewMilliQuantity(10*resources.CpuRequest, resource.DecimalSI),
+							"memory": *resource.NewQuantity(resources.MemoryRequest*1_000_000, resource.BinarySI),
+							// "hugepages-2Mi":       *resource.NewQuantity(1<<30, resource.BinarySI),
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	patchBytes, err := strategicpatch.CreateTwoWayMergePatch(originalPodBytes, modifiedPodBytes, &v1.Pod{})
+	if err != nil {
+		return err
+	}
+
+	if _, err = e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Patch(ctx, e.Id, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
+		return errors2.Wrap(err, "environment/kubernetes: could not patch pod")
+	}
+
+	return nil
+}
 
 // Create creates a new container for the server using all the data that is
 // currently available for it. If the container already exists it will be
@@ -158,8 +202,8 @@ func (e *Environment) Create() error {
 	// pod anyways.
 	if _, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(ctx, e.Id, metav1.GetOptions{}); err == nil {
 		return nil
-	} else if !apierrors.IsNotFound(err) {
-		return errors.Wrap(err, "environment/kubernetes: failed to inspect pod")
+	} else if !errors.IsNotFound(err) {
+		return errors2.Wrap(err, "environment/kubernetes: failed to inspect pod")
 	}
 
 	cfg := config.Get()
@@ -180,13 +224,6 @@ func (e *Environment) Create() error {
 	labels["ContainerType"] = "server_process"
 
 	resources := e.Configuration.Limits()
-
-	var cpuLimit, cpuRequest *resource.Quantity
-	if resources.CpuLimit != 0 {
-		cpuLimit = resource.NewMilliQuantity(10*resources.CpuLimit, resource.DecimalSI)
-		cpuRequest = resource.NewMilliQuantity(int64(float64(resources.CpuLimit)*1.25), resource.DecimalSI)
-	}
-	memoryLimit := resource.NewQuantity(resources.BoundedMemoryLimit(), resource.BinarySI)
 
 	dnsPolicies := map[string]corev1.DNSPolicy{
 		"clusterfirstwithhostnet": corev1.DNSClusterFirstWithHostNet,
@@ -303,12 +340,14 @@ func (e *Environment) Create() error {
 					},
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
-							corev1.ResourceCPU:    *cpuLimit,
-							corev1.ResourceMemory: *memoryLimit,
+							corev1.ResourceCPU:    *resource.NewMilliQuantity(10*resources.CpuLimit, resource.DecimalSI),
+							corev1.ResourceMemory: *resource.NewQuantity(resources.MemoryLimit*1_000_000, resource.BinarySI),
+							// "hugepages-2Mi":       *resource.NewQuantity(1<<30, resource.BinarySI),
 						},
 						Requests: corev1.ResourceList{
-							corev1.ResourceCPU:    *cpuRequest,
-							corev1.ResourceMemory: *resource.NewQuantity(memoryLimit.Value()/2, resource.BinarySI),
+							corev1.ResourceCPU:    *resource.NewMilliQuantity(10*resources.CpuRequest, resource.DecimalSI),
+							corev1.ResourceMemory: *resource.NewQuantity(resources.MemoryRequest*1_000_000, resource.BinarySI),
+							// "hugepages-2Mi":       *resource.NewQuantity(1<<30, resource.BinarySI),
 						},
 					},
 					VolumeMounts: []corev1.VolumeMount{
@@ -359,6 +398,18 @@ func (e *Environment) Create() error {
 		},
 	}
 
+	// Disable CPU request / limit if is set to Unlimited
+	if resources.CpuLimit == 0 {
+		pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceMemory: *resource.NewQuantity(resources.MemoryRequest*1_000_000, resource.BinarySI),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceMemory: *resource.NewQuantity(resources.MemoryLimit*1_000_000, resource.BinarySI),
+			},
+		}
+	}
+
 	// Prevents high CPU usage of kubelet by preventing chown on the entire CSI
 	if pod.Spec.SecurityContext.FSGroupChangePolicy == nil {
 		fsGroupChangePolicy := corev1.FSGroupChangeOnRootMismatch
@@ -366,7 +417,7 @@ func (e *Environment) Create() error {
 	}
 
 	// Check if Node Selector array is empty before we continue
-	if len(e.Configuration.NodeSelectors()) > 1 {
+	if len(e.Configuration.NodeSelectors()) > 0 {
 		pod.Spec.NodeSelector = map[string]string{}
 
 		// Loop through the map and create a node selector string
@@ -462,7 +513,7 @@ func (e *Environment) Create() error {
 	}
 
 	if _, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
-		return errors.Wrap(err, "environment/kubernetes: failed to create pod")
+		return errors2.Wrap(err, "environment/kubernetes: failed to create pod")
 	}
 
 	return nil
@@ -507,7 +558,8 @@ func (e *Environment) CreateService() error {
 			Name:      "kuber-" + e.Id + "-tcp",
 			Namespace: config.Get().Cluster.Namespace,
 			Labels: map[string]string{
-				"uuid": e.Id,
+				"uuid":    e.Id,
+				"Service": "Kubectyl",
 			},
 		},
 		Spec: corev1.ServiceSpec{
@@ -543,7 +595,8 @@ func (e *Environment) CreateService() error {
 			Name:      "kuber-" + e.Id + "-udp",
 			Namespace: config.Get().Cluster.Namespace,
 			Labels: map[string]string{
-				"uuid": e.Id,
+				"uuid":    e.Id,
+				"Service": "Kubectyl",
 			},
 		},
 		Spec: corev1.ServiceSpec{
@@ -607,7 +660,7 @@ func (e *Environment) CreateService() error {
 		}
 	}
 
-	services, err := e.client.CoreV1().Services(cfg.Cluster.Namespace).List(context.TODO(), metav1.ListOptions{})
+	services, err := e.client.CoreV1().Services(cfg.Cluster.Namespace).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -624,7 +677,11 @@ func (e *Environment) CreateService() error {
 						tcp.Annotations = annotations
 						udp.Annotations = annotations
 
-						tcp.Spec.Ports[0].Port = tcp.Spec.Ports[0].Port + 1
+						port, err := e.CreateServiceWithUniquePort()
+						if err != nil || port == 0 {
+							return err
+						}
+						tcp.Spec.Ports[0].Port = int32(port)
 					}
 				}
 			}
@@ -632,24 +689,21 @@ func (e *Environment) CreateService() error {
 	}
 
 	if _, err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).Create(ctx, tcp, metav1.CreateOptions{}); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return errors.Wrap(err, "environment/kubernetes: failed to create TCP service")
+		if !errors.IsAlreadyExists(err) {
+			return errors2.Wrap(err, "environment/kubernetes: failed to create TCP service")
 		}
 	}
 
 	if _, err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).Create(ctx, udp, metav1.CreateOptions{}); err != nil {
-		if !apierrors.IsAlreadyExists(err) {
-			return errors.Wrap(err, "environment/kubernetes: failed to create UDP service")
+		if !errors.IsAlreadyExists(err) {
+			return errors2.Wrap(err, "environment/kubernetes: failed to create UDP service")
 		}
 	}
 
 	return nil
 }
 
-func (e *Environment) CreateSFTP() error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+func (e *Environment) CreateSFTP(ctx context.Context) error {
 	cfg := config.Get()
 
 	dnsPolicies := map[string]corev1.DNSPolicy{
@@ -687,7 +741,8 @@ func (e *Environment) CreateSFTP() error {
 			Namespace: cfg.Cluster.Namespace,
 			Labels: map[string]string{
 				"uuid":          e.Id,
-				"ContainerType": "sftp",
+				"Service":       "Kubectyl",
+				"ContainerType": "sftp_server",
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -765,7 +820,7 @@ func (e *Environment) CreateSFTP() error {
 
 	_, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
-		if apierrors.IsAlreadyExists(err) {
+		if errors.IsAlreadyExists(err) {
 			pod, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(ctx, e.Id, metav1.GetOptions{})
 			if err != nil {
 				return err
@@ -778,10 +833,10 @@ func (e *Environment) CreateSFTP() error {
 					return err
 				}
 
-				return e.CreateSFTP()
+				return e.CreateSFTP(ctx)
 			}
 		} else {
-			return errors.Wrap(err, "environment/kubernetes: failed to create SFTP pod")
+			return errors2.Wrap(err, "environment/kubernetes: failed to create SFTP pod")
 		}
 	}
 
@@ -822,7 +877,7 @@ func (e *Environment) Destroy() error {
 	services, err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).List(context.Background(), metav1.ListOptions{
 		LabelSelector: "uuid=" + e.Id,
 	})
-	if err != nil && !apierrors.IsNotFound(err) {
+	if err != nil && !errors.IsNotFound(err) {
 		return err
 	} else {
 		for _, s := range services.Items {
@@ -835,7 +890,7 @@ func (e *Environment) Destroy() error {
 
 	// Delete installer pod
 	err = e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(context.Background(), e.Id+"-installer", metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &policy})
-	if err != nil && !apierrors.IsNotFound(err) {
+	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
 
@@ -844,7 +899,7 @@ func (e *Environment) Destroy() error {
 		GracePeriodSeconds: &zero,
 		PropagationPolicy:  &policy,
 	})
-	if err != nil && !apierrors.IsNotFound(err) {
+	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
 
@@ -853,7 +908,7 @@ func (e *Environment) Destroy() error {
 		GracePeriodSeconds: &zero,
 		PropagationPolicy:  &policy,
 	})
-	if err != nil && !apierrors.IsNotFound(err) {
+	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
 
@@ -862,7 +917,7 @@ func (e *Environment) Destroy() error {
 		GracePeriodSeconds: &zero,
 		PropagationPolicy:  &policy,
 	})
-	if err != nil && !apierrors.IsNotFound(err) {
+	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
 
@@ -876,7 +931,7 @@ func (e *Environment) Destroy() error {
 // that it gets pushed into the stdin.
 func (e *Environment) SendCommand(c string) error {
 	if !e.IsAttached() {
-		return errors.Wrap(ErrNotAttached, "environment/kubernetes: cannot send command to container")
+		return errors2.Wrap(ErrNotAttached, "environment/kubernetes: cannot send command to container")
 	}
 
 	e.mu.RLock()
@@ -906,7 +961,7 @@ func (e *Environment) SendCommand(c string) error {
 		return err
 	}
 
-	return errors.Wrap(err, "environment/kubernetes: could not write to container stream")
+	return errors2.Wrap(err, "environment/kubernetes: could not write to container stream")
 }
 
 // Readlog reads the log file for the server. This does not care if the server

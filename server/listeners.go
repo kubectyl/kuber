@@ -90,6 +90,13 @@ func (s *Server) StartEventListeners() {
 	s.Environment.SetLogCallback(s.processConsoleOutputEvent)
 
 	go func() {
+		if err := s.Environment.WatchPodEvents(s.Context()); err != nil {
+			s.Log().WithField("error", err).Warn("failed to watch pod events")
+			return
+		}
+	}()
+
+	go func() {
 		for {
 			select {
 			case v := <-c:
@@ -127,11 +134,15 @@ func (s *Server) StartEventListeners() {
 							s.OnStateChange()
 						}
 					case environment.DockerImagePullStatus:
-						s.Events().Publish(InstallOutputEvent, e.Data)
+						s.PublishConsoleOutputFromDaemon(e.Data.(string))
 					case environment.DockerImagePullStarted:
-						s.PublishConsoleOutputFromDaemon("Pulling Docker container image, this could take a few minutes to complete...")
+						s.PublishConsoleOutputFromDaemon(e.Data.(string))
 					case environment.DockerImagePullCompleted:
-						s.PublishConsoleOutputFromDaemon("Finished pulling Docker container image")
+						s.PublishConsoleOutputFromDaemon(e.Data.(string))
+					case environment.DockerImagePullBackOff:
+						s.PublishConsoleOutputFromDaemon(e.Data.(string))
+					case environment.DockerImagePullErr:
+						s.PublishConsoleOutputFromDaemon(e.Data.(string))
 					default:
 					}
 				}(v, limit)
