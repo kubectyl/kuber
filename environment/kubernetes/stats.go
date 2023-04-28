@@ -88,14 +88,14 @@ func (e *Environment) pollResources(ctx context.Context) error {
 
 	rbuf := bufio.NewReader(r)
 
-	cfg := config.Get().Cluster
-
 	var cpuQuery string
 	var memoryQuery string
 	var promAPI pv1.API
 	var mc *metrics.Clientset
 
-	if cfg.Metrics == "prometheus" {
+	cfg := config.Get().Cluster
+	switch cfg.Metrics {
+	case "prometheus":
 		// Set up the Prometheus API client
 		promURL := cfg.PrometheusAddress
 		promClient, err := api.NewClient(api.Config{
@@ -109,7 +109,8 @@ func (e *Environment) pollResources(ctx context.Context) error {
 		// Define the queries to retrieve the CPU and memory usage of a container in a pod
 		cpuQuery = fmt.Sprintf("sum(rate(container_cpu_usage_seconds_total{namespace=\"%s\",pod=\"%s\",container=\"process\"}[5m]))", config.Get().Cluster.Namespace, e.Id)
 		memoryQuery = fmt.Sprintf("sum(container_memory_working_set_bytes{namespace=\"%s\",pod=\"%s\",container=\"process\"})", config.Get().Cluster.Namespace, e.Id)
-	} else {
+
+	default:
 		mc, err = metrics.NewForConfig(e.config)
 		if err != nil {
 			return err
@@ -123,138 +124,68 @@ func (e *Environment) pollResources(ctx context.Context) error {
 			break
 		}
 
-		if cfg.Metrics == "metrics_api" {
-			// Don't throw an error if pod metrics are not available, just keep trying.
-			podMetrics, err := mc.MetricsV1beta1().PodMetricses(config.Get().Cluster.Namespace).Get(ctx, e.Id, metav1.GetOptions{})
+		var cpu string
+		var memory int64
 
-			// Check if container index 0 is not out of range,
-			// if it is then send only the uptime stats.
-			//
-			// @see https://stackoverflow.com/questions/26126235/panic-runtime-error-index-out-of-range-in-go
-			if len(podMetrics.Containers) != 0 {
-				cpuQuantity := ""
-				memQuantity, ok := int64(0), false
-
-				for i, c := range podMetrics.Containers {
-					if c.Name == "process" {
-						cpuQuantity = podMetrics.Containers[i].Usage.Cpu().AsDec().String()
-						memQuantity, ok = podMetrics.Containers[i].Usage.Memory().AsInt64()
-					} else {
-						continue
-					}
-				}
-
-				if !ok {
-					break
-				}
-
-				uptime = uptime + 1000
-
-				f, _ := strconv.ParseFloat(cpuQuantity, 32)
-				if err != nil {
-					break
-				}
-
-				st := environment.Stats{
-					Uptime:      uptime,
-					Memory:      uint64(memQuantity),
-					CpuAbsolute: f * 100,
-					Network:     environment.NetworkStats{},
-				}
-
-				b, err := rbuf.ReadBytes('\n')
-				if err == io.EOF {
-					continue
-				}
-
-				words := strings.Fields(string(bytes.TrimSpace(b)))
-
-				if len(words) != 0 {
-					rxBytes, _ := strconv.ParseUint(words[0], 10, 64)
-					txBytes, _ := strconv.ParseUint(words[1], 10, 64)
-
-					st.Network.RxBytes += rxBytes
-					st.Network.TxBytes += txBytes
-				}
-
-				e.Events().Publish(environment.ResourceEvent, st)
-			} else {
-				uptime = uptime + 1000
-
-				st := environment.Stats{
-					Uptime: uptime,
-				}
-
-				b, err := rbuf.ReadBytes('\n')
-				if err == io.EOF {
-					continue
-				}
-
-				words := strings.Fields(string(bytes.TrimSpace(b)))
-
-				if len(words) != 0 {
-					rxBytes, _ := strconv.ParseUint(words[0], 10, 64)
-					txBytes, _ := strconv.ParseUint(words[1], 10, 64)
-
-					st.Network.RxBytes += rxBytes
-					st.Network.TxBytes += txBytes
-				}
-
-				e.Events().Publish(environment.ResourceEvent, st)
-			}
-		} else {
-			// Execute the queries to retrieve the CPU and memory usage of the container
+		switch cfg.Metrics {
+		case "prometheus":
 			cpuResult, _, err := promAPI.Query(ctx, cpuQuery, time.Now())
 			if err != nil {
 				return err
 			}
+			if vec, ok := cpuResult.(model.Vector); ok && len(vec) > 0 {
+				cpu = vec[0].Value.String()
+			}
+
 			memoryResult, _, err := promAPI.Query(ctx, memoryQuery, time.Now())
 			if err != nil {
 				return err
 			}
+			if vec, ok := memoryResult.(model.Vector); ok && len(vec) > 0 {
+				memory = int64(vec[0].Value)
+			}
+		default:
+			// Don't throw an error if pod metrics are not available yet,
+			// just keep trying until the server context is canceled.
+			podMetrics, _ := mc.MetricsV1beta1().PodMetricses(config.Get().Cluster.Namespace).Get(ctx, e.Id, metav1.GetOptions{})
 
-			uptime = uptime + 1000
-
-			var parsedValue float64
-			if vec, ok := cpuResult.(model.Vector); ok && len(vec) > 0 {
-				// The vector is not empty, so we can safely access its first element.
-				latestValue := cpuResult.(model.Vector)[0].Value
-				valueString := fmt.Sprintf("%f", latestValue)
-				parsedValue, err = strconv.ParseFloat(valueString, 64)
-				if err != nil {
-					return err
+			if len(podMetrics.Containers) != 0 {
+				for i, c := range podMetrics.Containers {
+					if c.Name == "process" {
+						cpu = podMetrics.Containers[i].Usage.Cpu().AsDec().String()
+						memory, _ = podMetrics.Containers[i].Usage.Memory().AsInt64()
+					}
+					continue
 				}
 			}
-
-			var memory model.SampleValue
-			if vec, ok := memoryResult.(model.Vector); ok && len(vec) > 0 {
-				memory = memoryResult.(model.Vector)[0].Value
-			}
-
-			st := environment.Stats{
-				Uptime:      uptime,
-				Memory:      uint64(memory),
-				CpuAbsolute: parsedValue * 100,
-				Network:     environment.NetworkStats{},
-			}
-
-			b, err := rbuf.ReadBytes('\n')
-			if err == io.EOF {
-				continue
-			}
-
-			words := strings.Fields(string(bytes.TrimSpace(b)))
-
-			if len(words) != 0 {
-				rxBytes, _ := strconv.ParseUint(words[0], 10, 64)
-				txBytes, _ := strconv.ParseUint(words[1], 10, 64)
-
-				st.Network.RxBytes += rxBytes
-				st.Network.TxBytes += txBytes
-			}
-
-			e.Events().Publish(environment.ResourceEvent, st)
 		}
+
+		uptime = uptime + 1000
+		f, _ := strconv.ParseFloat(cpu, 32)
+
+		st := environment.Stats{
+			Uptime:      uptime,
+			Memory:      uint64(memory),
+			CpuAbsolute: f * 100,
+			Network:     environment.NetworkStats{},
+		}
+
+		// Make sure we still receive any network data
+		b, err := rbuf.ReadBytes('\n')
+		if err == io.EOF {
+			continue
+		}
+
+		bytes := strings.Fields(string(bytes.TrimSpace(b)))
+		if len(bytes) != 0 {
+			rxBytes, _ := strconv.ParseUint(bytes[0], 10, 64)
+			txBytes, _ := strconv.ParseUint(bytes[1], 10, 64)
+
+			st.Network.RxBytes += rxBytes
+			st.Network.TxBytes += txBytes
+		}
+
+		e.Events().Publish(environment.ResourceEvent, st)
 
 		time.Sleep(time.Second)
 	}
