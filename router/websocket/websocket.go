@@ -386,7 +386,7 @@ func (h *Handler) HandleInbound(ctx context.Context, m Message) error {
 			// 	return nil
 			// }
 
-			if running, _ := h.server.Environment.Exists(); !running {
+			if exists, _ := h.server.Environment.Exists(); !exists {
 				return nil
 			}
 

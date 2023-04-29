@@ -3,7 +3,6 @@ package kubernetes
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -17,9 +16,7 @@ import (
 	"github.com/docker/docker/api/types/mount"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
@@ -129,63 +126,26 @@ func (e *Environment) InSituUpdate() error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
 
-	pod, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(ctx, e.Id, metav1.GetOptions{})
+	pvc, err := e.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Get(ctx, fmt.Sprintf("%s-pvc", e.Id), metav1.GetOptions{})
 	if err != nil {
-		// If the pod doesn't exist for some reason there really isn't anything
-		// we can do to fix that in this process (it doesn't make sense at least). In those
-		// cases just return without doing anything since we still want to save the configuration
-		// to the disk.
-
-		// We'll let a boot process make modifications to the pod if needed at this point.
+		// If the pvc doesn't exist for some reason there really isn't anything
+		// we can do to fix that in this process.
 		if errors.IsNotFound(err) {
 			return nil
 		}
-		return errors2.Wrap(err, "environment/kubernetes: could not inspect pod")
+		return errors2.Wrap(err, "environment/kubernetes: could not inspect pvc")
 	}
 
 	resources := e.Configuration.Limits()
 
-	originalPodBytes, err := json.Marshal(pod)
-	if err != nil {
-		return err
-	}
+	pvc.Spec.Resources.Requests["storage"] = *resource.NewQuantity(resources.MemoryLimit*1_000_000, resource.BinarySI)
 
-	modifiedPodBytes, err := json.Marshal(&v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      pod.Name,
-			Namespace: pod.Namespace,
-		},
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{
-				{
-					Name: pod.Spec.Containers[0].Name,
-					Resources: v1.ResourceRequirements{
-						Limits: v1.ResourceList{
-							"cpu":    *resource.NewMilliQuantity(10*resources.CpuLimit, resource.DecimalSI),
-							"memory": *resource.NewQuantity(resources.MemoryLimit*1_000_000, resource.BinarySI),
-							// "hugepages-2Mi":       *resource.NewQuantity(1<<30, resource.BinarySI),
-						},
-						Requests: v1.ResourceList{
-							"cpu":    *resource.NewMilliQuantity(10*resources.CpuRequest, resource.DecimalSI),
-							"memory": *resource.NewQuantity(resources.MemoryRequest*1_000_000, resource.BinarySI),
-							// "hugepages-2Mi":       *resource.NewQuantity(1<<30, resource.BinarySI),
-						},
-					},
-				},
-			},
-		},
-	})
-	if err != nil {
-		return err
-	}
-
-	patchBytes, err := strategicpatch.CreateTwoWayMergePatch(originalPodBytes, modifiedPodBytes, &v1.Pod{})
-	if err != nil {
-		return err
-	}
-
-	if _, err = e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Patch(ctx, e.Id, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
-		return errors2.Wrap(err, "environment/kubernetes: could not patch pod")
+	if _, err = e.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Update(ctx, pvc, metav1.UpdateOptions{}); err != nil {
+		// Don't throw an error if the PVC is not dynamically created,
+		if errors.IsForbidden(err) {
+			return nil
+		}
+		return errors2.Wrap(err, "environment/kubernetes: could not update pvc")
 	}
 
 	return nil

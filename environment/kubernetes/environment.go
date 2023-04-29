@@ -148,7 +148,11 @@ func (e *Environment) Exists() (bool, error) {
 	}
 	for _, container := range p.Spec.Containers {
 		if container.Name == "process" && p.Status.ContainerStatuses != nil {
-			return true, nil
+			for _, status := range p.Status.ContainerStatuses {
+				if status.Name == container.Name && status.State.Waiting == nil {
+					return true, nil
+				}
+			}
 		}
 	}
 	return false, nil

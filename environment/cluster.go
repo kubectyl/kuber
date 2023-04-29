@@ -9,7 +9,6 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -40,7 +39,7 @@ func Cluster() (c *rest.Config, clientset *kubernetes.Clientset, err error) {
 	var caData []byte
 	if cfg.KeyFile != "" && !cfg.Insecure {
 		// Load the cluster certificate authority data
-		caData, err = ioutil.ReadFile(cfg.CAFile)
+		caData, err = os.ReadFile(cfg.CAFile)
 		if err != nil {
 			fmt.Printf("Error reading certificate authority data: %v\n", err)
 			return
@@ -52,7 +51,7 @@ func Cluster() (c *rest.Config, clientset *kubernetes.Clientset, err error) {
 	var certData []byte
 	if cfg.KeyFile != "" && !cfg.Insecure {
 		// Load the client certificate data
-		certData, err = ioutil.ReadFile(cfg.CertFile)
+		certData, err = os.ReadFile(cfg.CertFile)
 		if err != nil {
 			fmt.Printf("Error reading client certificate data: %v\n", err)
 			return
@@ -64,7 +63,7 @@ func Cluster() (c *rest.Config, clientset *kubernetes.Clientset, err error) {
 	var keyData []byte
 	if cfg.KeyFile != "" && !cfg.Insecure {
 		// Load the client key data
-		keyData, err = ioutil.ReadFile(cfg.KeyFile)
+		keyData, err = os.ReadFile(cfg.KeyFile)
 		if err != nil {
 			fmt.Printf("Error reading client key data: %v\n", err)
 			return

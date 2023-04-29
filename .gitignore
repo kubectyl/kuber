@@ -51,3 +51,6 @@ debug
 *.pprof
 *.pdf
 pprof.*
+
+test
+test.gpg
