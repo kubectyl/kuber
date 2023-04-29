@@ -422,7 +422,13 @@ func (e *Environment) Create() error {
 
 		// Loop through the map and create a node selector string
 		for k, v := range e.Configuration.NodeSelectors() {
+			if !environment.LabelNameRegex.MatchString(k) {
+				continue
+			}
 			pod.Spec.NodeSelector[k] = v
+			if !environment.LabelValueRegex.MatchString(v) {
+				pod.Spec.NodeSelector[k] = ""
+			}
 		}
 	}
 

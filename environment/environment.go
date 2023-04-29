@@ -2,6 +2,7 @@ package environment
 
 import (
 	"context"
+	"regexp"
 	"time"
 
 	"github.com/kubectyl/kuber/events"
@@ -24,6 +25,9 @@ const (
 	ProcessRunningState  = "running"
 	ProcessStoppingState = "stopping"
 )
+
+var LabelNameRegex = regexp.MustCompile(`^[a-zA-Z]([-a-zA-Z0-9_.]*[a-zA-Z0-9])?(\/[a-zA-Z]([-a-zA-Z0-9_.]*[a-zA-Z0-9])?)*$`)
+var LabelValueRegex = regexp.MustCompile(`^([A-Za-z0-9][-A-Za-z0-9_.]*[A-Za-z0-9])?$`)
 
 // Defines the basic interface that all environments need to implement so that
 // a server can be properly controlled.
