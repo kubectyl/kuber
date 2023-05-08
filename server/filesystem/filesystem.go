@@ -3,7 +3,6 @@ package filesystem
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -54,7 +53,7 @@ var (
 
 // New creates a new Filesystem instance for a given server.
 func New(root string, size int64, denylist []string, addr string) *Filesystem {
-	key, err := ioutil.ReadFile(environment.PrivateKeyPath())
+	key, err := os.ReadFile(environment.PrivateKeyPath())
 	if err != nil {
 		log.Fatalf("Unable to read private key: %v", err)
 	}
@@ -539,15 +538,22 @@ func (fs *Filesystem) deleteRecursive(name string) error {
 		return errors.Wrap(err, "ReadDir")
 	}
 
+	if len(entries) == 0 {
+		err = connection.sftpClient.RemoveDirectory(name)
+		if err != nil {
+			return errors.Wrap(err, "RemoveDirectory")
+		}
+	}
+
 	for _, fi := range entries {
 		itemName := connection.sftpClient.Join(name, fi.Name())
 		if fi.IsDir() {
-			err := fs.deleteRecursive(itemName)
+			err = fs.deleteRecursive(itemName)
 			if err != nil {
 				return errors.Wrap(err, "ReadDir")
 			}
 
-			err = connection.sftpClient.RemoveDirectory(itemName)
+			err = connection.sftpClient.RemoveDirectory(name)
 			if err != nil {
 				return errors.Wrap(err, "RemoveDirectory")
 			}
@@ -562,32 +568,6 @@ func (fs *Filesystem) deleteRecursive(name string) error {
 	}
 
 	return nil
-}
-
-type fileOpener struct {
-	busy uint
-}
-
-// Attempts to open a given file up to "attempts" number of times, using a backoff. If the file
-// cannot be opened because of a "text file busy" error, we will attempt until the number of attempts
-// has been exhaused, at which point we will abort with an error.
-func (fo *fileOpener) open(path string, flags int, perm os.FileMode) (*os.File, error) {
-	for {
-		f, err := os.OpenFile(path, flags, perm)
-
-		// If there is an error because the text file is busy, go ahead and sleep for a few
-		// hundred milliseconds and then try again up to three times before just returning the
-		// error back to the caller.
-		//
-		// Based on code from: https://github.com/golang/go/issues/22220#issuecomment-336458122
-		if err != nil && fo.busy < 3 && strings.Contains(err.Error(), "text file busy") {
-			time.Sleep(100 * time.Millisecond << fo.busy)
-			fo.busy++
-			continue
-		}
-
-		return f, err
-	}
 }
 
 // ListDirectory lists the contents of a given directory and returns stat

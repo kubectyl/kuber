@@ -1,10 +1,12 @@
 package filesystem
 
 import (
+	"io"
 	"os"
 	"strconv"
 	"time"
 
+	"emperror.dev/errors"
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/goccy/go-json"
 )
@@ -52,17 +54,32 @@ func (fs *Filesystem) Stat(p string) (Stat, error) {
 }
 
 func (fs *Filesystem) unsafeStat(p string) (Stat, error) {
-	s, err := os.Stat(p)
+	connection, err := fs.manager.GetConnection()
+	if err != nil {
+		return Stat{}, err
+	}
+	if connection == nil || connection.sftpClient == nil {
+		return Stat{}, errors.New("client connection is invalid")
+	}
+	s, err := connection.sftpClient.Stat(p)
 	if err != nil {
 		return Stat{}, err
 	}
 
 	var m *mimetype.MIME
 	if !s.IsDir() {
-		m, err = mimetype.DetectFile(p)
+		f, err := connection.sftpClient.Open(p)
 		if err != nil {
 			return Stat{}, err
 		}
+		defer f.Close()
+
+		buffer, err := io.ReadAll(f)
+		if err != nil {
+			return Stat{}, err
+		}
+
+		m = mimetype.Detect(buffer)
 	}
 
 	st := Stat{

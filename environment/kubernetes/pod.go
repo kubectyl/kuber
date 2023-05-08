@@ -136,9 +136,13 @@ func (e *Environment) InSituUpdate() error {
 		return errors2.Wrap(err, "environment/kubernetes: could not inspect pvc")
 	}
 
-	resources := e.Configuration.Limits()
+	newSize := *resource.NewQuantity(e.Configuration.Limits().DiskSpace, resource.BinarySI)
 
-	pvc.Spec.Resources.Requests["storage"] = *resource.NewQuantity(resources.MemoryLimit*1_000_000, resource.BinarySI)
+	if newSize.Cmp(pvc.Spec.Resources.Requests["storage"]) < 0 {
+		return errors2.Wrap(err, "environment/kubernetes: pvc new size is less than previous value")
+	}
+
+	pvc.Spec.Resources.Requests["storage"] = *resource.NewQuantity(e.Configuration.Limits().DiskSpace, resource.BinarySI)
 
 	if _, err = e.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Update(ctx, pvc, metav1.UpdateOptions{}); err != nil {
 		// Don't throw an error if the PVC is not dynamically created,
@@ -170,7 +174,7 @@ func (e *Environment) Create() error {
 	p := e.Configuration.Ports()
 	a := e.Configuration.Allocations()
 	evs := e.Configuration.EnvironmentVariables()
-	// cfs := e.Configuration.ConfigurationFiles()
+	cfs := e.Configuration.ConfigurationFiles()
 
 	// Merge user-provided labels with system labels
 	confLabels := e.Configuration.Labels()
@@ -392,44 +396,89 @@ func (e *Environment) Create() error {
 		}
 	}
 
-	// for _, k := range cfs {
-	// replacement := make(map[string]string)
-	// for _, t := range k.Replace {
-	// 	replacement[t.Match] = t.ReplaceWith.String()
-	// }
+	if len(cfs) > 0 {
+		// Initialize an empty slice of initContainers
+		pod.Spec.InitContainers = []corev1.Container{}
 
-	// Generate the init container ENV from a loop
-	// envs := []corev1.EnvVar{}
+		// Create a map to store the file data for the ConfigMap
+		fileData := make(map[string]string)
 
-	// for key, value := range replacement {
-	// 	envs = append(envs, corev1.EnvVar{
-	// 		Name:  fmt.Sprintf("%s_%s", strings.ToUpper(strings.ReplaceAll(k.FileName, ".", "_")), key),
-	// 		Value: value,
-	// 	})
-	// }
+		for _, k := range cfs {
+			// replacement := make(map[string]string)
+			for _, t := range k.Replace {
+				// replacement[t.Match] = t.ReplaceWith.String()
+				fileData[k.FileName] += fmt.Sprintf("%s=%s\n", t.Match, t.ReplaceWith.String())
+			}
 
-	// command := k.Parse(k.FileName, false)
+			command, err := k.Parse("/config/", "/home/container/")
+			if err != nil {
+				return err
+			}
 
-	// Initialize an empty slice of initContainers
-	// pod.Spec.InitContainers = []corev1.Container{}
+			// Add a new initContainer to the Pod
+			newInitContainer := corev1.Container{
+				// Name:      "replace-" + strings.ToLower(strings.ReplaceAll(k.FileName, ".", "-")),
+				Name:            "configuration-files",
+				Image:           "busybox",
+				ImagePullPolicy: corev1.PullIfNotPresent,
+				Command:         command,
+				Resources:       corev1.ResourceRequirements{},
+				VolumeMounts: []corev1.VolumeMount{
+					{
+						Name:      "replacement",
+						MountPath: "/config",
+						ReadOnly:  true,
+					},
+					{
+						Name:      "storage",
+						MountPath: "/home/container",
+					},
+				},
+			}
 
-	// Add a new initContainer to the Pod
-	// newInitContainer := corev1.Container{
-	// 	Name:      "replace-" + strings.ToLower(strings.ReplaceAll(k.FileName, ".", "-")),
-	// 	Image:     "busybox",
-	// 	Command:   command,
-	// 	Env:       envs,
-	// 	Resources: corev1.ResourceRequirements{},
-	// 	VolumeMounts: []corev1.VolumeMount{
-	// 		{
-	// 			Name:      "storage",
-	// 			MountPath: "/home/container",
-	// 		},
-	// 	},
-	// }
+			pod.Spec.InitContainers = append(pod.Spec.InitContainers, newInitContainer)
+		}
 
-	// pod.Spec.InitContainers = append(pod.Spec.InitContainers, newInitContainer)
-	// }
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: "replacement",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: e.Id + "-replacement",
+					},
+				},
+			},
+		})
+
+		// Create the ConfigMap object with the file data
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      e.Id + "-replacement",
+				Namespace: cfg.Cluster.Namespace,
+			},
+			Data: fileData,
+		}
+
+		// Check if the ConfigMap already exists
+		_, err := e.client.CoreV1().ConfigMaps(cfg.Cluster.Namespace).Get(context.TODO(), e.Id+"-replacement", metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				_, err = e.client.CoreV1().ConfigMaps(cfg.Cluster.Namespace).Create(context.TODO(), configMap, metav1.CreateOptions{})
+				if err != nil {
+					return err
+				}
+				e.log().Info("replacement configmap created successfully")
+			} else {
+				return err
+			}
+		} else {
+			_, err = e.client.CoreV1().ConfigMaps(cfg.Cluster.Namespace).Update(context.TODO(), configMap, metav1.UpdateOptions{})
+			if err != nil {
+				return err
+			}
+			e.log().Info("replacement configmap updated successfully")
+		}
+	}
 
 	// Assign all TCP / UDP ports or allocations to the container
 	bindings := p.Bindings()
@@ -806,7 +855,7 @@ func (e *Environment) CreateSFTP(ctx context.Context) error {
 		}
 	}
 
-	err = wait.PollImmediate(time.Second, 30*time.Second, func() (bool, error) {
+	err = wait.PollUntilWithContext(ctx, time.Second, func(ctx context.Context) (bool, error) {
 		pod, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(ctx, e.Id, metav1.GetOptions{})
 		if err != nil {
 			return false, err
@@ -823,7 +872,11 @@ func (e *Environment) CreateSFTP(ctx context.Context) error {
 			return false, fmt.Errorf("unknown pod status")
 		}
 	})
-	if err != nil {
+	if err != nil && !errors2.Is(err, context.Canceled) {
+		// Don't throw an error if the pod has been deleted in the meantime
+		if errors.IsNotFound(err) {
+			return nil
+		}
 		return err
 	}
 
@@ -860,8 +913,17 @@ func (e *Environment) Destroy() error {
 		return err
 	}
 
-	// Delete configmap
-	err = e.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).Delete(context.Background(), e.Id+"-configmap", metav1.DeleteOptions{
+	// Delete replacement configmap
+	err = e.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).Delete(context.Background(), e.Id+"-replacement", metav1.DeleteOptions{
+		GracePeriodSeconds: &zero,
+		PropagationPolicy:  &policy,
+	})
+	if err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+
+	// Delete installer configmap
+	err = e.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).Delete(context.Background(), e.Id+"-installer", metav1.DeleteOptions{
 		GracePeriodSeconds: &zero,
 		PropagationPolicy:  &policy,
 	})

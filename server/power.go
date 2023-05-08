@@ -178,6 +178,10 @@ func (s *Server) HandlePowerAction(action PowerAction, waitSeconds ...int) error
 			return err
 		}
 
+		if err := s.Environment.CreateSFTP(s.Context()); err != nil {
+			return err
+		}
+
 		if action == PowerActionStop {
 			return nil
 		}
@@ -189,7 +193,11 @@ func (s *Server) HandlePowerAction(action PowerAction, waitSeconds ...int) error
 
 		return s.Environment.Start(s.Context())
 	case PowerActionTerminate:
-		return s.Environment.Terminate(s.Context())
+		if err := s.Environment.Terminate(s.Context()); err != nil {
+			return err
+		}
+		return s.Environment.CreateSFTP(s.Context())
+		// return s.Environment.Terminate(s.Context())
 	}
 
 	return errors.New("attempting to handle unknown power action")

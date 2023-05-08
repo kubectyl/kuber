@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	iofs "io/fs"
 	"log"
 	"os"
 	"path"
@@ -21,6 +20,7 @@ import (
 	gzip2 "github.com/klauspost/compress/gzip"
 	zip2 "github.com/klauspost/compress/zip"
 	"github.com/mholt/archiver/v4"
+	"github.com/pkg/sftp"
 )
 
 // CompressFiles compresses all the files matching the given paths in the
@@ -83,30 +83,6 @@ func (fs *Filesystem) CompressFiles(dir string, paths []string) (os.FileInfo, er
 		}
 	}
 
-	// a := &Archive{BasePath: cleanedRootDir, Files: cleaned}
-	// d := path.Join(
-	// 	cleanedRootDir,
-	// 	fmt.Sprintf("archive-%s.tar.gz", strings.ReplaceAll(time.Now().Format(time.RFC3339), ":", "")),
-	// )
-
-	// if err := a.Create(context.Background(), d); err != nil {
-	// 	return nil, err
-	// }
-
-	// f, err := os.Stat(d)
-	// if err != nil {
-	// 	_ = os.Remove(d)
-	// 	return nil, err
-	// }
-
-	// if err := fs.HasSpaceFor(f.Size()); err != nil {
-	// 	_ = os.Remove(d)
-	// 	return nil, err
-	// }
-
-	// fs.addDisk(f.Size())
-
-	// return f, nil
 	return nil, nil
 }
 
@@ -119,25 +95,22 @@ func (fs *Filesystem) SpaceAvailableForDecompression(ctx context.Context, dir st
 		return nil
 	}
 
-	source, err := fs.SafePath(filepath.Join(dir, file))
-	if err != nil {
-		return err
-	}
+	// source, err := fs.SafePath(filepath.Join(dir, file))
+	// if err != nil {
+	// 	return err
+	// }
 
 	// Get the cached size in a parallel process so that if it is not cached we are not
 	// waiting an unnecessary amount of time on this call.
-	dirSize, err := fs.DiskUsage(false)
+	dirSize, _ := fs.DiskUsage(false)
 
-	fsys, err := archiver.FileSystem(source)
+	connection, err := fs.manager.GetConnection()
 	if err != nil {
-		if errors.Is(err, archiver.ErrNoMatch) {
-			return newFilesystemError(ErrCodeUnknownArchive, err)
-		}
 		return err
 	}
 
 	var size int64
-	return iofs.WalkDir(fsys, ".", func(path string, d iofs.DirEntry, err error) error {
+	err = walkDirSFTP(connection.sftpClient, ".", func(path string, fileInfo os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -147,16 +120,52 @@ func (fs *Filesystem) SpaceAvailableForDecompression(ctx context.Context, dir st
 			// Stop walking if the context is canceled.
 			return ctx.Err()
 		default:
-			info, err := d.Info()
-			if err != nil {
-				return err
+			if fileInfo.IsDir() {
+				return nil // Skip directories
 			}
-			if atomic.AddInt64(&size, info.Size())+dirSize > fs.MaxDisk() {
+			if atomic.AddInt64(&size, fileInfo.Size())+dirSize > fs.MaxDisk() {
 				return newFilesystemError(ErrCodeDiskSpace, nil)
 			}
 			return nil
 		}
 	})
+	if err != nil {
+		if sftpErr, ok := err.(*sftp.StatusError); ok {
+			return fmt.Errorf("sftp error: %s", sftpErr.Error())
+		}
+		return err
+	}
+
+	return nil
+}
+
+type SFTPWalkerFunc func(path string, fileInfo os.FileInfo, err error) error
+
+func walkDirSFTP(client *sftp.Client, dirPath string, fn SFTPWalkerFunc) error {
+	entries, err := client.ReadDir(dirPath)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		subPath := filepath.Join(dirPath, entry.Name())
+
+		if entry.IsDir() {
+			err := walkDirSFTP(client, subPath, fn)
+			if err != nil {
+				if err := fn(subPath, entry, err); err != nil && err != filepath.SkipDir {
+					return err
+				}
+			}
+		} else {
+			err := fn(subPath, entry, nil)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 // DecompressFile will decompress a file in a given directory by using the
@@ -177,11 +186,16 @@ func (fs *Filesystem) DecompressFile(ctx context.Context, dir string, file strin
 // into the server's directory.
 func (fs *Filesystem) DecompressFileUnsafe(ctx context.Context, dir string, file string) error {
 	// Ensure that the archive actually exists on the system.
-	if _, err := os.Stat(file); err != nil {
+	if _, err := fs.Stat(file); err != nil {
 		return errors.WithStack(err)
 	}
 
-	f, err := os.Open(file)
+	connection, err := fs.manager.GetConnection()
+	if err != nil {
+		return err
+	}
+
+	f, err := connection.sftpClient.Open(file)
 	if err != nil {
 		return err
 	}

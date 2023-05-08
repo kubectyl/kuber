@@ -18,16 +18,16 @@ func (s *Server) UpdateConfigurationFiles() {
 		f := cf
 
 		pool.Submit(func() {
-			p, err := s.Filesystem().SafePath(f.FileName)
-			if err != nil {
-				s.Log().WithField("error", err).Error("failed to generate safe path for configuration file")
+			// p, err := s.Filesystem().SafePath(f.FileName)
+			// if err != nil {
+			// 	s.Log().WithField("error", err).Error("failed to generate safe path for configuration file")
 
-				return
-			}
+			// 	return
+			// }
 
-			if err := f.Parse(p, false); err != nil {
-				s.Log().WithField("error", err).Error("failed to parse and update server configuration file")
-			}
+			// if err := f.Parse(p, false); err != nil {
+			// 	s.Log().WithField("error", err).Error("failed to parse and update server configuration file")
+			// }
 
 			s.Log().WithField("path", f.FileName).Debug("finished processing server configuration file")
 		})

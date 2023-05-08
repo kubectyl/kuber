@@ -2,7 +2,6 @@ package filesystem
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -33,63 +32,67 @@ func (fs *Filesystem) IsIgnored(paths ...string) error {
 // This logic is actually copied over from the SFTP server code. Ideally that eventually
 // either gets ported into this application, or is able to make use of this package.
 func (fs *Filesystem) SafePath(p string) (string, error) {
-	var nonExistentPathResolution string
+	// var nonExistentPathResolution string
 
 	// Start with a cleaned up path before checking the more complex bits.
 	r := fs.unsafeFilePath(p)
 
+	// TODO: continue safe path functions for SFTP
 	return r, nil
 
 	// At the same time, evaluate the symlink status and determine where this file or folder
 	// is truly pointing to.
-	ep, err := filepath.EvalSymlinks(r)
-	if err != nil && !os.IsNotExist(err) {
-		return "", errors.Wrap(err, "server/filesystem: failed to evaluate symlink")
-	} else if os.IsNotExist(err) {
-		// The requested directory doesn't exist, so at this point we need to iterate up the
-		// path chain until we hit a directory that _does_ exist and can be validated.
-		parts := strings.Split(filepath.Dir(r), "/")
 
-		var try string
-		// Range over all of the path parts and form directory pathings from the end
-		// moving up until we have a valid resolution or we run out of paths to try.
-		for k := range parts {
-			try = strings.Join(parts[:(len(parts)-k)], "/")
+	// ep, err := filepath.EvalSymlinks(r)
+	// if err != nil && !os.IsNotExist(err) {
+	// return "", errors.Wrap(err, "server/filesystem: failed to evaluate symlink")
+	// } else if os.IsNotExist(err) {
+	// The requested directory doesn't exist, so at this point we need to iterate up the
+	// path chain until we hit a directory that _does_ exist and can be validated.
+	// parts := strings.Split(filepath.Dir(r), "/")
 
-			if !fs.unsafeIsInDataDirectory(try) {
-				break
-			}
+	// var try string
+	// Range over all of the path parts and form directory pathings from the end
+	// moving up until we have a valid resolution or we run out of paths to try.
+	// for k := range parts {
+	// 	try = strings.Join(parts[:(len(parts)-k)], "/")
 
-			t, err := filepath.EvalSymlinks(try)
-			if err == nil {
-				nonExistentPathResolution = t
-				break
-			}
-		}
-	}
+	// 	if !fs.unsafeIsInDataDirectory(try) {
+	// 		break
+	// 	}
+
+	// 	t, err := filepath.EvalSymlinks(try)
+	// 	if err == nil {
+	// 		nonExistentPathResolution = t
+	// 		break
+	// 	}
+	// }
+	// }
 
 	// If the new path doesn't start with their root directory there is clearly an escape
 	// attempt going on, and we should NOT resolve this path for them.
-	if nonExistentPathResolution != "" {
-		if !fs.unsafeIsInDataDirectory(nonExistentPathResolution) {
-			return "", NewBadPathResolution(p, nonExistentPathResolution)
-		}
 
-		// If the nonExistentPathResolution variable is not empty then the initial path requested
-		// did not exist and we looped through the pathway until we found a match. At this point
-		// we've confirmed the first matched pathway exists in the root server directory, so we
-		// can go ahead and just return the path that was requested initially.
-		return r, nil
-	}
+	// if nonExistentPathResolution != "" {
+	// 	if !fs.unsafeIsInDataDirectory(nonExistentPathResolution) {
+	// 		return "", NewBadPathResolution(p, nonExistentPathResolution)
+	// 	}
+
+	// 	// If the nonExistentPathResolution variable is not empty then the initial path requested
+	// 	// did not exist and we looped through the pathway until we found a match. At this point
+	// 	// we've confirmed the first matched pathway exists in the root server directory, so we
+	// 	// can go ahead and just return the path that was requested initially.
+	// 	return r, nil
+	// }
 
 	// If the requested directory from EvalSymlinks begins with the server root directory go
 	// ahead and return it. If not we'll return an error which will block any further action
 	// on the file.
-	if fs.unsafeIsInDataDirectory(ep) {
-		return ep, nil
-	}
 
-	return "", NewBadPathResolution(p, r)
+	// if fs.unsafeIsInDataDirectory(ep) {
+	// 	return ep, nil
+	// }
+
+	// return "", NewBadPathResolution(p, r)
 }
 
 // Generate a path to the file by cleaning it up and appending the root server path to it. This

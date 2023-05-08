@@ -317,13 +317,6 @@ func (e *Environment) WaitForStop(ctx context.Context, duration time.Duration, t
 		return doTermination("wait")
 	}
 
-	if terminate && e.st.Load() == environment.ProcessOfflineState {
-		err = e.CreateSFTP(ctx)
-		if err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 

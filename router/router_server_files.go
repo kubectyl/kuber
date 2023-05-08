@@ -3,7 +3,6 @@ package router
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -73,15 +72,6 @@ func getServerFileContents(c *gin.Context) {
 		middleware.CaptureAndAbort(c, err)
 		return
 	}
-}
-
-type httpError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-func (e *httpError) Error() string {
-	return fmt.Sprintf("%d: %s", e.Code, e.Message)
 }
 
 // Returns the contents of a directory for a server.
@@ -515,17 +505,19 @@ func postServerChmodFile(c *gin.Context) {
 
 	// Loop over the array of files passed in and perform the move or rename action against each.
 	for _, p := range data.Files {
+		pCopy := p // Create a local copy of p
+
 		g.Go(func() error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			default:
-				mode, err := strconv.ParseUint(p.Mode, 8, 32)
+				mode, err := strconv.ParseUint(pCopy.Mode, 8, 32)
 				if err != nil {
 					return errInvalidFileMode
 				}
 
-				if err := s.Filesystem().Chmod(path.Join(data.Root, p.File), os.FileMode(mode)); err != nil {
+				if err := s.Filesystem().Chmod(path.Join(data.Root, pCopy.File), os.FileMode(mode)); err != nil {
 					// Return nil if the error is an is not exists.
 					// NOTE: os.IsNotExist() does not work if the error is wrapped.
 					if errors.Is(err, os.ErrNotExist) {

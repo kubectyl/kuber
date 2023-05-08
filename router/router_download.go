@@ -3,7 +3,6 @@ package router
 import (
 	"bufio"
 	"net/http"
-	"os"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -30,7 +29,7 @@ func getDownloadFile(c *gin.Context) {
 	}
 
 	p, _ := s.Filesystem().SafePath(token.FilePath)
-	st, err := os.Stat(p)
+	st, err := s.Filesystem().Stat(p)
 	// If there is an error or we're somehow trying to download a directory, just
 	// respond with the appropriate error.
 	if err != nil {
@@ -43,7 +42,7 @@ func getDownloadFile(c *gin.Context) {
 		return
 	}
 
-	f, err := os.Open(p)
+	f, _, err := s.Filesystem().File(p)
 	if err != nil {
 		middleware.CaptureAndAbort(c, err)
 		return

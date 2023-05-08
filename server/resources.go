@@ -29,13 +29,13 @@ type ResourceUsage struct {
 // Proc returns the current resource usage stats for the server instance. This returns
 // a copy of the tracked resources, so making any changes to the response will not
 // have the desired outcome for you most likely.
-func (s *Server) Proc() ResourceUsage {
+func (s *Server) Proc() *ResourceUsage {
 	s.resources.mu.Lock()
 	defer s.resources.mu.Unlock()
 	// Store the updated disk usage when requesting process usage.
 	atomic.StoreInt64(&s.resources.Disk, s.Filesystem().CachedUsage())
 	//goland:noinspection GoVetCopyLock
-	return s.resources
+	return &s.resources
 }
 
 // UpdateStats updates the current stats for the server's resource usage.

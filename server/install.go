@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"fmt"
 	"html/template"
 	"io"
 	"os"
@@ -83,7 +84,7 @@ func (s *Server) install(reinstall bool) error {
 func (s *Server) Reinstall() error {
 	if s.Environment.State() != environment.ProcessOfflineState {
 		s.Log().Debug("waiting for server instance to enter a stopped state")
-		if err := s.Environment.WaitForStop(s.Context(), time.Second*10, true); err != nil {
+		if err := s.Environment.WaitForStop(s.Context(), 10*time.Second, true); err != nil {
 			return errors2.WrapIf(err, "install: failed to stop running environment")
 		}
 	}
@@ -164,16 +165,38 @@ func (s *Server) SetRestoring(state bool) {
 
 // RemoveContainer removes the installation container for the server.
 func (ip *InstallationProcess) RemoveContainer() error {
-	resources := []string{ip.Server.ID() + "-installer", ip.Server.ID(), ip.Server.ID() + "-configmap"}
+	policy := metav1.DeletePropagationForeground
+	if err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).DeleteCollection(
+		ip.Server.Context(),
+		metav1.DeleteOptions{
+			PropagationPolicy: &policy,
+		},
+		metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("Service=Kubectyl,uuid=%s", ip.Server.ID()),
+		},
+	); err != nil {
+		return errors2.WithMessage(err, "failed to delete PODs associated with PVC")
+	}
 
-	for _, resource := range resources {
-		err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ip.Server.Context(), resource, metav1.DeleteOptions{})
-		if err != nil && !errors.IsNotFound(err) {
-			return err
+	if err := wait.Poll(5*time.Second, 1*time.Minute, func() (bool, error) {
+		pods, err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).List(ip.Server.Context(), metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("Service=Kubectyl,uuid=%s", ip.Server.ID()),
+		})
+		if err != nil {
+			return false, err
 		}
 
-		err = ip.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).Delete(ip.Server.Context(), resource, metav1.DeleteOptions{})
-		if err != nil && !errors.IsNotFound(err) {
+		if len(pods.Items) == 0 {
+			return true, nil
+		}
+
+		return false, nil
+	}); err != nil {
+		return errors2.WithMessage(err, "failed while waiting for PODs to be deleted")
+	}
+
+	if err := ip.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).Delete(ip.Server.Context(), fmt.Sprintf("%s-installer", ip.Server.ID()), metav1.DeleteOptions{}); err != nil {
+		if !errors.IsNotFound(err) {
 			return err
 		}
 	}
@@ -262,15 +285,30 @@ func (ip *InstallationProcess) BeforeExecute() error {
 	if err := ip.writeScriptToDisk(); err != nil {
 		return errors2.WithMessage(err, "failed to write installation script to disk")
 	}
-	var zero int64 = 0
-	policy := metav1.DeletePropagationForeground
-	if err := ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Delete(context.Background(), ip.Server.ID()+"-pvc", metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &policy}); err != nil {
-		if !errors.IsNotFound(err) {
-			return errors2.WithMessage(err, "failed to remove pvc before running installation")
-		}
-	}
+
 	if err := ip.RemoveContainer(); err != nil {
 		return errors2.WithMessage(err, "failed to remove existing install container for server")
+	}
+
+	if err := ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Delete(context.Background(), ip.Server.ID()+"-pvc", metav1.DeleteOptions{}); err != nil {
+		if !errors.IsNotFound(err) {
+			return errors2.WithMessage(err, "failed to remove PVC before running installation")
+		}
+	}
+
+	if err := wait.PollUntilWithContext(ip.Server.Context(), time.Second, func(ctx context.Context) (bool, error) {
+		_, err := ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Get(ctx, fmt.Sprintf("%s-pvc", ip.Server.ID()), metav1.GetOptions{})
+		if err != nil && !errors.IsNotFound(err) {
+			return false, err
+		}
+
+		if errors.IsNotFound(err) {
+			return true, nil
+		}
+
+		return false, nil
+	}); err != nil {
+		return errors2.WithMessage(err, "failed while waiting for PVC to be deleted")
 	}
 	return nil
 }
@@ -365,7 +403,7 @@ func (ip *InstallationProcess) Execute() (string, error) {
 			APIVersion: "v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      ip.Server.ID() + "-configmap",
+			Name:      ip.Server.ID() + "-installer",
 			Namespace: config.Get().Cluster.Namespace,
 		},
 		Data: map[string]string{
@@ -413,6 +451,10 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ip.Server.ID() + "-installer",
 			Namespace: config.Get().Cluster.Namespace,
+			Labels: map[string]string{
+				"uuid":    ip.Server.ID(),
+				"Service": "Kubectyl",
+			},
 		},
 		Spec: corev1.PodSpec{
 			Volumes: []corev1.Volume{
@@ -429,7 +471,7 @@ func (ip *InstallationProcess) Execute() (string, error) {
 					VolumeSource: corev1.VolumeSource{
 						ConfigMap: &corev1.ConfigMapVolumeSource{
 							LocalObjectReference: corev1.LocalObjectReference{
-								Name: ip.Server.ID() + "-configmap",
+								Name: ip.Server.ID() + "-installer",
 							},
 							DefaultMode: &[]int32{int32(0755)}[0],
 						},

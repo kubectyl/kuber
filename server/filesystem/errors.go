@@ -2,8 +2,6 @@ package filesystem
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"emperror.dev/errors"
 	"github.com/apex/log"
@@ -94,15 +92,16 @@ func (fs *Filesystem) error(err error) *log.Entry {
 // If there is a path resolution error just skip the item entirely. Only return this for a
 // directory, otherwise return nil. Returning this error for a file will stop the walking
 // for the remainder of the directory. This is assuming an os.FileInfo struct was even returned.
-func (fs *Filesystem) handleWalkerError(err error, f os.FileInfo) error {
-	if !IsErrorCode(err, ErrCodePathResolution) {
-		return err
-	}
-	if f != nil && f.IsDir() {
-		return filepath.SkipDir
-	}
-	return nil
-}
+
+// func (fs *Filesystem) handleWalkerError(err error, f os.FileInfo) error {
+// 	if !IsErrorCode(err, ErrCodePathResolution) {
+// 		return err
+// 	}
+// 	if f != nil && f.IsDir() {
+// 		return filepath.SkipDir
+// 	}
+// 	return nil
+// }
 
 // IsFilesystemError checks if the given error is one of the Filesystem errors.
 func IsFilesystemError(err error) bool {

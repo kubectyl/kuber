@@ -298,6 +298,9 @@ func (s *Server) OnStateChange() {
 			if err := server.handleServerCrash(); err != nil {
 				if IsTooFrequentCrashError(err) {
 					server.Log().Info("did not restart server after crash; occurred too soon after the last")
+					if err := s.Environment.CreateSFTP(context.Background()); err != nil {
+						server.Log().WithField("error", err).Error("failed to start server SFTP")
+					}
 				} else {
 					s.PublishConsoleOutputFromDaemon("Server crash was detected but an error occurred while handling it.")
 					server.Log().WithField("error", err).Error("failed to handle server crash")
@@ -333,7 +336,7 @@ func (s *Server) ToAPIResponse() APIResponse {
 	return APIResponse{
 		State:         s.Environment.State(),
 		IsSuspended:   s.IsSuspended(),
-		Utilization:   s.Proc(),
+		Utilization:   *s.Proc(),
 		Configuration: *s.Config(),
 		Services:      s.Environment.GetServiceDetails(),
 	}
