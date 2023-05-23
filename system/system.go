@@ -8,38 +8,8 @@ import (
 )
 
 type Information struct {
-	Version string            `json:"version"`
-	Docker  DockerInformation `json:"docker"`
-	System  System            `json:"system"`
-}
-
-type DockerInformation struct {
-	Version    string           `json:"version"`
-	Cgroups    DockerCgroups    `json:"cgroups"`
-	Containers DockerContainers `json:"containers"`
-	Storage    DockerStorage    `json:"storage"`
-	Runc       DockerRunc       `json:"runc"`
-}
-
-type DockerCgroups struct {
-	Driver  string `json:"driver"`
 	Version string `json:"version"`
-}
-
-type DockerContainers struct {
-	Total   int `json:"total"`
-	Running int `json:"running"`
-	Paused  int `json:"paused"`
-	Stopped int `json:"stopped"`
-}
-
-type DockerStorage struct {
-	Driver     string `json:"driver"`
-	Filesystem string `json:"filesystem"`
-}
-
-type DockerRunc struct {
-	Version string `json:"version"`
+	System  System `json:"system"`
 }
 
 type System struct {

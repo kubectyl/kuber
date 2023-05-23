@@ -14,9 +14,11 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/kubectyl/kuber/config"
@@ -206,27 +208,26 @@ func (e *Environment) CreateServiceWithUniquePort() (int, error) {
 }
 
 func (e *Environment) WatchPodEvents(ctx context.Context) error {
-	watcher, err := e.client.CoreV1().Events(config.Get().Cluster.Namespace).Watch(ctx, metav1.ListOptions{
-		FieldSelector: fmt.Sprintf("involvedObject.kind=Pod,involvedObject.name=%s", e.Id),
-		Watch:         true,
-	})
-	if err != nil {
-		return err
+	eventListWatcher := &cache.ListWatch{
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			options.FieldSelector = fmt.Sprintf("involvedObject.kind=Pod,involvedObject.name=%s", e.Id)
+			return e.client.CoreV1().Events(config.Get().Cluster.Namespace).List(ctx, options)
+		},
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			options.FieldSelector = fmt.Sprintf("involvedObject.kind=Pod,involvedObject.name=%s", e.Id)
+			return e.client.CoreV1().Events(config.Get().Cluster.Namespace).Watch(ctx, options)
+		},
 	}
-	defer watcher.Stop()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case ev := <-watcher.ResultChan():
-			switch ev.Type {
-			case watch.Error:
-				continue
-			case watch.Added, watch.Modified:
-				event, ok := ev.Object.(*v1.Event)
+	_, eventController := cache.NewInformer(
+		eventListWatcher,
+		&v1.Event{},
+		1*time.Minute,
+		cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				event, ok := obj.(*v1.Event)
 				if !ok {
-					continue
+					return
 				}
 				if event.InvolvedObject.Kind == "Pod" &&
 					event.InvolvedObject.Name == e.Id &&
@@ -247,9 +248,18 @@ func (e *Environment) WatchPodEvents(ctx context.Context) error {
 						e.Events().Publish(environment.DockerImagePullBackOff, event.Message)
 					}
 				}
-			}
-		}
+			},
+		},
+	)
+
+	go eventController.Run(ctx.Done())
+
+	if !cache.WaitForCacheSync(ctx.Done(), eventController.HasSynced) {
+		return fmt.Errorf("failed to sync cache")
 	}
+
+	<-ctx.Done()
+	return nil
 }
 
 // ExitState returns the container exit state, the exit code and whether or not

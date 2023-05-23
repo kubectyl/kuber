@@ -240,9 +240,9 @@ func (m *Manager) InitServer(data remote.ServerConfigurationResponse) (*Server, 
 			case "LoadBalancer":
 				if len(svc.Status.LoadBalancer.Ingress) > 0 {
 					ip = svc.Status.LoadBalancer.Ingress[0].IP
-				}
-				if len(svc.Spec.Ports) > 0 {
-					port = int(svc.Spec.Ports[0].Port)
+					if len(svc.Spec.Ports) > 0 {
+						port = int(svc.Spec.Ports[0].Port)
+					}
 				}
 			case "NodePort":
 				if len(svc.Spec.Ports) > 0 {
@@ -250,7 +250,9 @@ func (m *Manager) InitServer(data remote.ServerConfigurationResponse) (*Server, 
 				}
 			}
 
-			s.fs.SetManager(fmt.Sprintf("%s:%v", ip, port))
+			if err := s.fs.SetManager(fmt.Sprintf("%s:%v", ip, port)); err != nil {
+				return nil, err
+			}
 		}
 	}
 

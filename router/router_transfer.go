@@ -153,11 +153,11 @@ out:
 			case "archive":
 				trnsfr.Log().Debug("received archive")
 
-				tee := io.TeeReader(p, h)
-				if err := trnsfr.Server.Filesystem().ExtractStreamUnsafe(ctx, "/", tee); err != nil {
-					middleware.CaptureAndAbort(c, err)
-					return
-				}
+				// tee := io.TeeReader(p, h)
+				// if err := trnsfr.Server.Filesystem().ExtractStreamUnsafe(ctx, "/", tee); err != nil {
+				// 	middleware.CaptureAndAbort(c, err)
+				// 	return
+				// }
 
 				hasArchive = true
 			case "checksum":

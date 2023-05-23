@@ -88,10 +88,6 @@ func postServerRestoreBackup(c *gin.Context) {
 	if err := c.BindJSON(&data); err != nil {
 		return
 	}
-	if data.Adapter == snapshot.S3BackupAdapter && data.DownloadUrl == "" {
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "The download_url field is required when the backup adapter is set to S3."})
-		return
-	}
 
 	s.SetRestoring(true)
 	hasError := true

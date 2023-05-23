@@ -28,6 +28,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
+var deleteFiles = true
+
 // Install executes the installation stack for a server process. Bubbles any
 // errors up to the calling function which should handle contacting the panel to
 // notify it of the server state.
@@ -81,7 +83,9 @@ func (s *Server) install(reinstall bool) error {
 // Reinstall reinstalls a server's software by utilizing the installation script
 // for the server rocket. This does not touch any existing files for the server,
 // other than what the script modifies.
-func (s *Server) Reinstall() error {
+func (s *Server) Reinstall(delete bool) error {
+	deleteFiles = delete
+
 	if s.Environment.State() != environment.ProcessOfflineState {
 		s.Log().Debug("waiting for server instance to enter a stopped state")
 		if err := s.Environment.WaitForStop(s.Context(), 10*time.Second, true); err != nil {
@@ -114,6 +118,15 @@ func (s *Server) internalInstall() error {
 	}
 
 	s.Log().Info("completed installation process for server")
+
+	// Avoid blocking the whole process
+	go func() {
+		s.Log().Info("booting server SFTP process for the first time after installation")
+		if err := s.Environment.CreateSFTP(s.Context()); err != nil {
+			return
+		}
+	}()
+
 	return nil
 }
 
@@ -290,25 +303,29 @@ func (ip *InstallationProcess) BeforeExecute() error {
 		return errors2.WithMessage(err, "failed to remove existing install container for server")
 	}
 
-	if err := ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Delete(context.Background(), ip.Server.ID()+"-pvc", metav1.DeleteOptions{}); err != nil {
-		if !errors.IsNotFound(err) {
-			return errors2.WithMessage(err, "failed to remove PVC before running installation")
-		}
-	}
-
-	if err := wait.PollUntilWithContext(ip.Server.Context(), time.Second, func(ctx context.Context) (bool, error) {
-		_, err := ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Get(ctx, fmt.Sprintf("%s-pvc", ip.Server.ID()), metav1.GetOptions{})
-		if err != nil && !errors.IsNotFound(err) {
-			return false, err
+	if deleteFiles {
+		if err := ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Delete(context.Background(), ip.Server.ID()+"-pvc", metav1.DeleteOptions{}); err != nil {
+			if !errors.IsNotFound(err) {
+				return errors2.WithMessage(err, "failed to remove PVC before running installation")
+			}
 		}
 
-		if errors.IsNotFound(err) {
-			return true, nil
-		}
+		if err := wait.PollUntilWithContext(ip.Server.Context(), time.Second, func(ctx context.Context) (bool, error) {
+			_, err := ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Get(ctx, fmt.Sprintf("%s-pvc", ip.Server.ID()), metav1.GetOptions{})
+			if err != nil && !errors.IsNotFound(err) {
+				return false, err
+			}
 
-		return false, nil
-	}); err != nil {
-		return errors2.WithMessage(err, "failed while waiting for PVC to be deleted")
+			if errors.IsNotFound(err) {
+				return true, nil
+			}
+
+			return false, nil
+		}); err != nil {
+			return errors2.WithMessage(err, "failed while waiting for PVC to be deleted")
+		}
+	} else {
+		ip.Server.Log().Info("skipping PVC deletion, disabled by user")
 	}
 	return nil
 }
@@ -383,7 +400,7 @@ func (ip *InstallationProcess) AfterExecute(containerId string) error {
 	return nil
 }
 
-// Execute executes the installation process inside a specially created docker
+// Execute executes the installation process inside a specially created Kubernetes pod
 // container.
 func (ip *InstallationProcess) Execute() (string, error) {
 	// Create a child context that is canceled once this function is done running. This
@@ -416,31 +433,33 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		ip.Server.Log().WithField("error", err).Warn("failed to create configmap")
 	}
 
-	pvc := &corev1.PersistentVolumeClaim{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "PersistentVolumeClaim",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ip.Server.ID() + "-pvc",
-			Namespace: config.Get().Cluster.Namespace,
-		},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{
-				corev1.PersistentVolumeAccessMode("ReadWriteOnce"),
+	if deleteFiles {
+		pvc := &corev1.PersistentVolumeClaim{
+			TypeMeta: metav1.TypeMeta{
+				Kind:       "PersistentVolumeClaim",
+				APIVersion: "v1",
 			},
-			Resources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					"storage": *resource.NewQuantity(ip.Server.DiskSpace(), resource.BinarySI),
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      ip.Server.ID() + "-pvc",
+				Namespace: config.Get().Cluster.Namespace,
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{
+					corev1.PersistentVolumeAccessMode("ReadWriteOnce"),
 				},
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						"storage": *resource.NewQuantity(ip.Server.DiskSpace(), resource.BinarySI),
+					},
+				},
+				StorageClassName: &[]string{config.Get().Cluster.StorageClass}[0],
 			},
-			StorageClassName: &[]string{config.Get().Cluster.StorageClass}[0],
-		},
-	}
+		}
 
-	_, err = ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Create(context.TODO(), pvc, metav1.CreateOptions{})
-	if err != nil {
-		return "", err
+		_, err = ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Create(context.TODO(), pvc, metav1.CreateOptions{})
+		if err != nil {
+			return "", err
+		}
 	}
 
 	pod := &corev1.Pod{
