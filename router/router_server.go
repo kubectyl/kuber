@@ -178,8 +178,17 @@ func postServerReinstall(c *gin.Context) {
 		return
 	}
 
+	var data struct {
+		DeleteFiles bool `json:"delete_files"`
+	}
+	// BindJSON sends 400 if the request fails, all we need to do is return
+	if err := c.BindJSON(&data); err != nil {
+		s.Log().WithField("error", err).Error("failed to parse delete files bool")
+		return
+	}
+
 	go func(s *server.Server) {
-		if err := s.Reinstall(); err != nil {
+		if err := s.Reinstall(data.DeleteFiles); err != nil {
 			s.Log().WithField("error", err).Error("failed to complete server re-install process")
 		}
 	}(s)

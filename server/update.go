@@ -50,11 +50,11 @@ func (s *Server) SyncWithEnvironment() {
 	if !s.IsSuspended() {
 		// Update the environment in place, allowing memory and CPU usage to be adjusted
 		// on the fly without the user needing to reboot (theoretically).
-		s.Log().Info("performing server storage limit modification on-the-fly")
+		s.Log().Info("checking server storage limit modification")
 		if err := s.Environment.InSituUpdate(); err != nil {
 			// This is not a failure, the process is still running fine and will fix itself on the
 			// next boot, or fail out entirely in a more logical position.
-			s.Log().WithField("error", err).Warn("failed to perform on-the-fly update of the server storage")
+			s.Log().WithField("error", err).Warn("failed to update server storage")
 		}
 	} else {
 		// Checks if the server is now in a suspended state. If so and a server process is currently running it

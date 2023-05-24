@@ -22,7 +22,6 @@ type AdapterType string
 
 const (
 	LocalBackupAdapter AdapterType = "kuber"
-	S3BackupAdapter    AdapterType = "s3"
 )
 
 // RestoreCallback is a generic restoration callback that exists for both local

@@ -136,18 +136,29 @@ func (e *Environment) InSituUpdate() error {
 		return errors2.Wrap(err, "environment/kubernetes: could not inspect pvc")
 	}
 
-	newSize := *resource.NewQuantity(e.Configuration.Limits().DiskSpace, resource.BinarySI)
+	newSize := e.Configuration.Limits().DiskSpace
+	oldSize := pvc.Spec.Resources.Requests["storage"]
 
-	if newSize.Cmp(pvc.Spec.Resources.Requests["storage"]) < 0 {
-		return errors2.Wrap(err, "environment/kubernetes: pvc new size is less than previous value")
+	oldSizeInMb := oldSize.Value() / (1024 * 1024)
+
+	// Skip further execution and do nothing
+	if newSize == oldSizeInMb {
+		return nil
+	} else if newSize < oldSizeInMb {
+		e.log().Warn("environment/kubernetes: PVC new size is less than previous value")
+		return nil
 	}
 
 	pvc.Spec.Resources.Requests["storage"] = *resource.NewQuantity(e.Configuration.Limits().DiskSpace, resource.BinarySI)
 
 	if _, err = e.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Update(ctx, pvc, metav1.UpdateOptions{}); err != nil {
 		// Don't throw an error if the PVC is not dynamically created,
-		if errors.IsForbidden(err) {
-			return nil
+		if statusErr, ok := err.(*errors.StatusError); ok && statusErr.ErrStatus.Reason == "Invalid" {
+			for _, detail := range statusErr.ErrStatus.Details.Causes {
+				if detail.Type == "FieldValueForbidden" && detail.Field == "spec.resources.requests.storage" {
+					return nil
+				}
+			}
 		}
 		return errors2.Wrap(err, "environment/kubernetes: could not update pvc")
 	}
@@ -833,6 +844,21 @@ func (e *Environment) CreateSFTP(ctx context.Context) error {
 		},
 	}
 
+	if len(e.Configuration.NodeSelectors()) > 0 {
+		pod.Spec.NodeSelector = map[string]string{}
+
+		// Loop through the map and create a node selector string
+		for k, v := range e.Configuration.NodeSelectors() {
+			if !environment.LabelNameRegex.MatchString(k) {
+				continue
+			}
+			pod.Spec.NodeSelector[k] = v
+			if !environment.LabelValueRegex.MatchString(v) {
+				pod.Spec.NodeSelector[k] = ""
+			}
+		}
+	}
+
 	_, err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
@@ -851,7 +877,7 @@ func (e *Environment) CreateSFTP(ctx context.Context) error {
 				return e.CreateSFTP(ctx)
 			}
 		} else {
-			return errors2.Wrap(err, "environment/kubernetes: failed to create SFTP pod")
+			e.log().WithField("error", err).Warn("environment/kubernetes: failed to create SFTP pod")
 		}
 	}
 
@@ -883,65 +909,57 @@ func (e *Environment) CreateSFTP(ctx context.Context) error {
 	return nil
 }
 
-// Destroy will remove the Docker container from the server. If the container
-// is currently running it will be forcibly stopped by Docker.
+// Destroy will remove all K8s resources of this server. If the pod
+// is currently running it will be forcibly stopped.
 func (e *Environment) Destroy() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	// We set it to stopping than offline to prevent crash detection from being triggered.
 	e.SetState(environment.ProcessStoppingState)
 
 	var zero int64 = 0
 	policy := metav1.DeletePropagationForeground
 
-	// Loop through services with server UUID and delete them
-	services, err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).List(context.Background(), metav1.ListOptions{
-		LabelSelector: "uuid=" + e.Id,
+	// Loop through services with service Kubectyl and server UUID and delete them
+	services, err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("Service=Kubectyl,uuid=%s", e.Id),
 	})
 	if err != nil && !errors.IsNotFound(err) {
 		return err
 	} else {
 		for _, s := range services.Items {
-			err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).Delete(context.TODO(), s.Name, metav1.DeleteOptions{})
+			err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).Delete(ctx, s.Name, metav1.DeleteOptions{})
 			if err != nil {
 				return err
 			}
 		}
 	}
 
-	// Delete installer pod
-	err = e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(context.Background(), e.Id+"-installer", metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &policy})
-	if err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-
-	// Delete replacement configmap
-	err = e.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).Delete(context.Background(), e.Id+"-replacement", metav1.DeleteOptions{
+	// Delete configmaps
+	err = e.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).DeleteCollection(ctx, metav1.DeleteOptions{
 		GracePeriodSeconds: &zero,
 		PropagationPolicy:  &policy,
+	}, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("Service=Kubectyl,uuid=%s", e.Id),
 	})
 	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
 
-	// Delete installer configmap
-	err = e.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).Delete(context.Background(), e.Id+"-installer", metav1.DeleteOptions{
+	// Delete pods
+	err = e.client.CoreV1().Pods(config.Get().Cluster.Namespace).DeleteCollection(ctx, metav1.DeleteOptions{
 		GracePeriodSeconds: &zero,
 		PropagationPolicy:  &policy,
-	})
-	if err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-
-	// Delete pod
-	err = e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(context.Background(), e.Id, metav1.DeleteOptions{
-		GracePeriodSeconds: &zero,
-		PropagationPolicy:  &policy,
+	}, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("Service=Kubectyl,uuid=%s", e.Id),
 	})
 	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
 
 	// Delete pvc
-	err = e.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Delete(context.Background(), e.Id+"-pvc", metav1.DeleteOptions{
+	err = e.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Delete(ctx, e.Id+"-pvc", metav1.DeleteOptions{
 		GracePeriodSeconds: &zero,
 		PropagationPolicy:  &policy,
 	})
@@ -1002,7 +1020,7 @@ func (e *Environment) Readlog(lines int) ([]string, error) {
 	})
 	podLogs, err := r.Stream(context.Background())
 	if err != nil {
-		return nil, err
+		return nil, nil
 	}
 	defer podLogs.Close()
 

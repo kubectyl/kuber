@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/kubectyl/kuber/config"
+	"github.com/kubectyl/kuber/environment"
 	"github.com/kubectyl/kuber/internal/models"
 	"github.com/kubectyl/kuber/router/downloader"
 	"github.com/kubectyl/kuber/router/middleware"
@@ -79,7 +80,9 @@ func getServerListDirectory(c *gin.Context) {
 	s := ExtractServer(c)
 	dir := c.Query("directory")
 	if stats, err := s.Filesystem().ListDirectory(dir); err != nil {
-		if strings.Contains(err.Error(), "processing error") {
+		if strings.Contains(err.Error(), "processing error") &&
+			s.Environment.State() != environment.ProcessOfflineState &&
+			s.Environment.State() != environment.ProcessRunningState {
 			c.AbortWithStatus(http.StatusServiceUnavailable)
 			return
 		}
@@ -417,7 +420,6 @@ func postServerCompressFiles(c *gin.Context) {
 		return
 	}
 
-	// TODO: archive sftp files
 	f, err := s.Filesystem().CompressFiles(data.RootPath, data.Files)
 	if err != nil {
 		middleware.CaptureAndAbort(c, err)

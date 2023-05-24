@@ -38,7 +38,6 @@ func Cluster() (c *rest.Config, clientset *kubernetes.Clientset, err error) {
 
 	var caData []byte
 	if cfg.KeyFile != "" && !cfg.Insecure {
-		// Load the cluster certificate authority data
 		caData, err = os.ReadFile(cfg.CAFile)
 		if err != nil {
 			fmt.Printf("Error reading certificate authority data: %v\n", err)
@@ -50,7 +49,6 @@ func Cluster() (c *rest.Config, clientset *kubernetes.Clientset, err error) {
 
 	var certData []byte
 	if cfg.KeyFile != "" && !cfg.Insecure {
-		// Load the client certificate data
 		certData, err = os.ReadFile(cfg.CertFile)
 		if err != nil {
 			fmt.Printf("Error reading client certificate data: %v\n", err)
@@ -62,7 +60,6 @@ func Cluster() (c *rest.Config, clientset *kubernetes.Clientset, err error) {
 
 	var keyData []byte
 	if cfg.KeyFile != "" && !cfg.Insecure {
-		// Load the client key data
 		keyData, err = os.ReadFile(cfg.KeyFile)
 		if err != nil {
 			fmt.Printf("Error reading client key data: %v\n", err)
@@ -70,6 +67,28 @@ func Cluster() (c *rest.Config, clientset *kubernetes.Clientset, err error) {
 		}
 
 		c.TLSClientConfig.KeyData = keyData
+	}
+
+	tokenFile := "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+	_, err = os.Stat(tokenFile)
+	if err == nil {
+		token, err := os.ReadFile(tokenFile)
+		if err != nil {
+			panic(err)
+		}
+
+		c.Host = os.Getenv("KUBERNETES_SERVICE_HOST")
+		c.BearerToken = string(token)
+
+		if !cfg.Insecure {
+			caData, err = os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+			if err != nil {
+				fmt.Printf("Error reading certificate authority data: %v\n", err)
+			} else {
+				c.TLSClientConfig.CAData = caData
+			}
+		}
 	}
 
 	client, err := kubernetes.NewForConfig(c)

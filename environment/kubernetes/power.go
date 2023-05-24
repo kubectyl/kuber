@@ -194,12 +194,6 @@ func (e *Environment) Stop(ctx context.Context) error {
 		return e.Terminate(ctx)
 	}
 
-	// If the process is already offline don't switch it back to stopping. Just leave it how
-	// it is and continue through to the stop handling for the process.
-	if e.st.Load() != environment.ProcessOfflineState {
-		e.SetState(environment.ProcessStoppingState)
-	}
-
 	waitPoll := func(ctx context.Context) error {
 		err := wait.PollUntilWithContext(ctx, time.Second, func(ctx context.Context) (done bool, err error) {
 			running, err := e.IsRunning(ctx)
@@ -217,7 +211,7 @@ func (e *Environment) Stop(ctx context.Context) error {
 			return false, nil
 		})
 		if err != nil {
-			return err
+			e.log().WithField("error", err).Warn("error while waiting for pod stop")
 		}
 
 		return nil
@@ -227,12 +221,18 @@ func (e *Environment) Stop(ctx context.Context) error {
 	// the instance. If we are not for some reason, just send the container stop event.
 	if e.IsAttached() &&
 		s.Type == remote.ProcessStopCommand &&
-		e.st.Load() != environment.ProcessOfflineState {
+		e.st.Load() == environment.ProcessRunningState {
 		e.SendCommand(s.Value)
 
 		if err := waitPoll(ctx); err != nil {
 			return err
 		}
+	}
+
+	// If the process is already offline don't switch it back to stopping. Just leave it how
+	// it is and continue through to the stop handling for the process.
+	if e.st.Load() != environment.ProcessOfflineState {
+		e.SetState(environment.ProcessStoppingState)
 	}
 
 	// Allow the stop action to run for however long it takes, similar to executing a command
@@ -306,7 +306,7 @@ func (e *Environment) WaitForStop(ctx context.Context, duration time.Duration, t
 			if errors.IsNotFound(err) {
 				return true, nil
 			}
-			return false, nil
+			return true, err
 		}
 		return false, nil
 	})

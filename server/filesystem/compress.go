@@ -3,6 +3,7 @@ package filesystem
 import (
 	"archive/tar"
 	"archive/zip"
+	"compress/bzip2"
 	"compress/gzip"
 	"context"
 	"fmt"
@@ -11,17 +12,115 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"emperror.dev/errors"
-	gzip2 "github.com/klauspost/compress/gzip"
-	zip2 "github.com/klauspost/compress/zip"
-	"github.com/mholt/archiver/v4"
+	"github.com/gabriel-vasile/mimetype"
+	"github.com/nwaples/rardecode/v2"
 	"github.com/pkg/sftp"
+	"github.com/ulikunitz/xz"
 )
+
+func (fs *Filesystem) createArchive(connection *SFTPConn, cleaned []string, archivePath string) error {
+	archiveFile, err := connection.sftpClient.Create(archivePath)
+	if err != nil {
+		return fmt.Errorf("failed to create archive file: %v", err)
+	}
+	defer archiveFile.Close()
+
+	// Create a gzip writer
+	gzipWriter := gzip.NewWriter(archiveFile)
+	defer gzipWriter.Close()
+
+	// Create a tar writer using the gzip writer
+	tarWriter := tar.NewWriter(gzipWriter)
+	defer tarWriter.Close()
+
+	for _, remoteFile := range cleaned {
+		fileInfo, err := connection.sftpClient.Stat(remoteFile)
+		if err != nil {
+			log.Printf("Failed to retrieve file info for %q: %v", remoteFile, err)
+			continue
+		}
+
+		if fileInfo.IsDir() {
+			err = fs.addDirectoryToArchive(connection.sftpClient, remoteFile, tarWriter)
+			if err != nil {
+				log.Printf("Failed to add directory %q to archive: %v", remoteFile, err)
+			}
+			continue
+		}
+
+		remoteReader, err := connection.sftpClient.Open(remoteFile)
+		if err != nil {
+			log.Printf("Failed to open remote file %q: %v", remoteFile, err)
+			continue
+		}
+		defer remoteReader.Close()
+
+		header := &tar.Header{
+			Name:    remoteFile,
+			Size:    fileInfo.Size(),
+			Mode:    int64(fileInfo.Mode().Perm()),
+			ModTime: fileInfo.ModTime(),
+		}
+
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return fmt.Errorf("failed to add file %q to archive: %v", remoteFile, err)
+		}
+
+		if _, err := io.Copy(tarWriter, remoteReader); err != nil {
+			return fmt.Errorf("failed to compress file %q: %v", remoteFile, err)
+		}
+	}
+
+	return nil
+}
+
+func (fs *Filesystem) addDirectoryToArchive(sftpClient *sftp.Client, remoteDir string, archiveWriter *tar.Writer) error {
+	entries, err := sftpClient.ReadDir(remoteDir)
+	if err != nil {
+		return fmt.Errorf("failed to read directory %q: %v", remoteDir, err)
+	}
+
+	for _, entry := range entries {
+		remotePath := filepath.Join(remoteDir, entry.Name())
+
+		if entry.IsDir() {
+			err = fs.addDirectoryToArchive(sftpClient, remotePath, archiveWriter)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+
+		remoteReader, err := sftpClient.Open(remotePath)
+		if err != nil {
+			log.Printf("Failed to open remote file %q: %v", remotePath, err)
+			continue
+		}
+		defer remoteReader.Close()
+
+		header := &tar.Header{
+			Name:    remotePath,
+			Size:    entry.Size(),
+			Mode:    int64(entry.Mode().Perm()),
+			ModTime: entry.ModTime(),
+		}
+
+		if err := archiveWriter.WriteHeader(header); err != nil {
+			return fmt.Errorf("failed to add file %q to archive: %v", remotePath, err)
+		}
+
+		if _, err := io.Copy(archiveWriter, remoteReader); err != nil {
+			return fmt.Errorf("failed to compress file %q: %v", remotePath, err)
+		}
+	}
+
+	return nil
+}
 
 // CompressFiles compresses all the files matching the given paths in the
 // specified directory. This function also supports passing nested paths to only
@@ -57,33 +156,17 @@ func (fs *Filesystem) CompressFiles(dir string, paths []string) (os.FileInfo, er
 		cleanedRootDir,
 		fmt.Sprintf("archive-%s.tar.gz", strings.ReplaceAll(time.Now().Format(time.RFC3339), ":", "")),
 	)
-	archiveFile, err := connection.sftpClient.Create(d)
+
+	if err := fs.createArchive(connection, cleaned, d); err != nil {
+		return nil, err
+	}
+
+	stat, err := fs.Stat(d)
 	if err != nil {
 		return nil, err
 	}
-	defer archiveFile.Close()
 
-	archiveWriter := zip.NewWriter(archiveFile)
-	defer archiveWriter.Close()
-
-	for _, remoteFile := range cleaned {
-		remoteReader, err := connection.sftpClient.Open(remoteFile)
-		if err != nil {
-			log.Printf("Failed to open remote file %q: %v", remoteFile, err)
-			continue
-		}
-		defer remoteReader.Close()
-
-		zipFile, err := archiveWriter.Create(remoteReader.Name())
-		if err != nil {
-			return nil, fmt.Errorf("failed to add file %q to archive: %v", remoteReader.Name(), err)
-		}
-		if _, err := io.Copy(zipFile, remoteReader); err != nil {
-			return nil, fmt.Errorf("failed to compress file %q: %v", remoteReader.Name(), err)
-		}
-	}
-
-	return nil, nil
+	return stat, nil
 }
 
 // SpaceAvailableForDecompression looks through a given archive and determines
@@ -199,127 +282,327 @@ func (fs *Filesystem) DecompressFileUnsafe(ctx context.Context, dir string, file
 	if err != nil {
 		return err
 	}
-	// TODO: defer file close?
+	defer f.Close()
 
-	// Identify the type of archive we are dealing with.
-	format, input, err := archiver.Identify(filepath.Base(file), f)
-	if err != nil {
-		if errors.Is(err, archiver.ErrNoMatch) {
-			return newFilesystemError(ErrCodeUnknownArchive, err)
-		}
-		return err
+	buffer := make([]byte, 512)
+
+	n, err := f.Read(buffer)
+	if err != nil && err != io.EOF {
+		return fmt.Errorf("failed to read remote file: %v", err)
+	}
+	if n == 0 {
+		return nil
 	}
 
-	return fs.extractStream(ctx, extractStreamOptions{
-		Directory: dir,
-		Format:    format,
-		Reader:    input,
-	})
+	mime := mimetype.Detect(buffer)
+
+	switch mime.String() {
+	case "application/vnd.rar", "application/x-rar-compressed":
+		return extractRARArchive(connection.sftpClient, file, dir)
+	case "application/x-tar", "application/x-br", "application/x-lzip", "application/x-sz", "application/zstd":
+		return extractTARArchive(connection.sftpClient, file, dir)
+	case "application/x-xz":
+		return extractTARXZArchive(connection.sftpClient, file, dir)
+	case "application/x-bzip2":
+		return extractBZIP2Archive(connection.sftpClient, file, dir)
+	case "application/gzip", "application/x-gzip":
+		return extractGZArchive(connection.sftpClient, file, dir)
+	case "application/zip":
+		return extractZIPArchive(connection.sftpClient, file, dir)
+	default:
+		return fmt.Errorf("unsupported archive format: %s", mime.String())
+	}
 }
 
-// ExtractStreamUnsafe .
-func (fs *Filesystem) ExtractStreamUnsafe(ctx context.Context, dir string, r io.Reader) error {
-	format, input, err := archiver.Identify("archive.tar.gz", r)
+// Extract RAR archive file from the remote SFTP server.
+func extractRARArchive(sftpClient *sftp.Client, remoteFilePath string, destinationDir string) error {
+	remoteFile, err := sftpClient.Open(remoteFilePath)
 	if err != nil {
-		if errors.Is(err, archiver.ErrNoMatch) {
-			return newFilesystemError(ErrCodeUnknownArchive, err)
-		}
-		return err
+		return fmt.Errorf("failed to open remote file: %v", err)
+	}
+	defer remoteFile.Close()
+
+	archive, err := rardecode.NewReader(remoteFile)
+	if err != nil {
+		return fmt.Errorf("failed to create RAR reader: %v", err)
 	}
 
-	return fs.extractStream(ctx, extractStreamOptions{
-		Directory: dir,
-		Format:    format,
-		Reader:    input,
-	})
-}
+	for {
+		header, err := archive.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read RAR header: %v", err)
+		}
 
-type extractStreamOptions struct {
-	// The directory to extract the archive to.
-	Directory string
-	// File name of the archive.
-	FileName string
-	// Format of the archive.
-	Format archiver.Format
-	// Reader for the archive.
-	Reader io.Reader
-}
-
-func (fs *Filesystem) extractStream(ctx context.Context, opts extractStreamOptions) error {
-	// Decompress and extract archive
-	if ex, ok := opts.Format.(archiver.Extractor); ok {
-		return ex.Extract(ctx, opts.Reader, nil, func(ctx context.Context, f archiver.File) error {
-			if f.IsDir() {
-				return nil
-			}
-			p := filepath.Join(opts.Directory, ExtractNameFromArchive(f))
-			// If it is ignored, just don't do anything with the file and skip over it.
-			if err := fs.IsIgnored(p); err != nil {
-				return nil
-			}
-			r, err := f.Open()
+		if header.IsDir {
+			destDir := filepath.Join(destinationDir, header.Name)
+			err := sftpClient.MkdirAll(destDir)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to create directory: %v", err)
 			}
-			defer r.Close()
-			if err := fs.Writefile(p, r); err != nil {
-				return wrapError(err, opts.FileName)
-			}
-			// Update the file permissions to the one set in the archive.
-			if err := fs.Chmod(p, f.Mode()); err != nil {
-				return wrapError(err, opts.FileName)
-			}
-			// Update the file modification time to the one set in the archive.
-			if err := fs.Chtimes(p, f.ModTime(), f.ModTime()); err != nil {
-				return wrapError(err, opts.FileName)
-			}
-			return nil
-		})
+			continue
+		}
+
+		destFilePath := filepath.Join(destinationDir, header.Name)
+		destFile, err := sftpClient.Create(destFilePath)
+		if err != nil {
+			return fmt.Errorf("failed to create file: %v", err)
+		}
+		defer destFile.Close()
+
+		_, err = io.Copy(destFile, archive)
+		if err != nil {
+			return fmt.Errorf("failed to extract file: %v", err)
+		}
 	}
+
 	return nil
 }
 
-// ExtractNameFromArchive looks at an archive file to try and determine the name
-// for a given element in an archive. Because of... who knows why, each file type
-// uses different methods to determine the file name.
-//
-// If there is a archiver.File#Sys() value present we will try to use the name
-// present in there, otherwise falling back to archiver.File#Name() if all else
-// fails. Without this logic present, some archive types such as zip/tars/etc.
-// will write all of the files to the base directory, rather than the nested
-// directory that is expected.
-//
-// For files like ".rar" types, there is no f.Sys() value present, and the value
-// of archiver.File#Name() will be what you need.
-func ExtractNameFromArchive(f archiver.File) string {
-	sys := f.Sys()
-	// Some archive types won't have a value returned when you call f.Sys() on them,
-	// such as ".rar" archives for example. In those cases the only thing you can do
-	// is hope that "f.Name()" is actually correct for them.
-	if sys == nil {
-		return f.Name()
+// Extract TAR archive file from the remote SFTP server.
+func extractTARArchive(sftpClient *sftp.Client, remoteFilePath string, destinationDir string) error {
+	remoteFile, err := sftpClient.Open(remoteFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to open remote file: %v", err)
 	}
-	switch s := sys.(type) {
-	case *zip.FileHeader:
-		return s.Name
-	case *zip2.FileHeader:
-		return s.Name
-	case *tar.Header:
-		return s.Name
-	case *gzip.Header:
-		return s.Name
-	case *gzip2.Header:
-		return s.Name
-	default:
-		// At this point we cannot figure out what type of archive this might be so
-		// just try to find the name field in the struct. If it is found return it.
-		field := reflect.Indirect(reflect.ValueOf(sys)).FieldByName("Name")
-		if field.IsValid() {
-			return field.String()
+	defer remoteFile.Close()
+
+	tarReader := tar.NewReader(remoteFile)
+
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
 		}
-		// Fallback to the basename of the file at this point. There is nothing we can really
-		// do to try and figure out what the underlying directory of the file is supposed to
-		// be since it didn't implement a name field.
-		return f.Name()
+		if err != nil {
+			return fmt.Errorf("failed to read TAR header: %v", err)
+		}
+
+		destFilePath := filepath.Join(destinationDir, header.Name)
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			err := sftpClient.MkdirAll(destFilePath)
+			if err != nil {
+				return fmt.Errorf("failed to create directory: %v", err)
+			}
+		case tar.TypeReg:
+			destFile, err := sftpClient.Create(destFilePath)
+			if err != nil {
+				return fmt.Errorf("failed to create file: %v", err)
+			}
+
+			_, err = io.Copy(destFile, tarReader)
+			if err != nil {
+				destFile.Close()
+				return fmt.Errorf("failed to extract file: %v", err)
+			}
+
+			destFile.Close()
+		}
 	}
+
+	return nil
+}
+
+// Extract GZ archive file from the remote SFTP server.
+func extractGZArchive(sftpClient *sftp.Client, remoteFilePath string, destinationDir string) error {
+	remoteFile, err := sftpClient.Open(remoteFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to open remote file: %v", err)
+	}
+	defer remoteFile.Close()
+
+	gzipReader, err := gzip.NewReader(remoteFile)
+	if err != nil {
+		return fmt.Errorf("failed to create gzip reader: %v", err)
+	}
+	defer gzipReader.Close()
+
+	tarReader := tar.NewReader(gzipReader)
+
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read TAR header: %v", err)
+		}
+
+		destFilePath := filepath.Join(destinationDir, header.Name)
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			err := sftpClient.MkdirAll(destFilePath)
+			if err != nil {
+				return fmt.Errorf("failed to create directory: %v", err)
+			}
+		case tar.TypeReg:
+			destFile, err := sftpClient.Create(destFilePath)
+			if err != nil {
+				return fmt.Errorf("failed to create file: %v", err)
+			}
+
+			_, err = io.Copy(destFile, tarReader)
+			if err != nil {
+				destFile.Close()
+				return fmt.Errorf("failed to extract file: %v", err)
+			}
+
+			destFile.Close()
+		}
+	}
+
+	return nil
+}
+
+// Extract TAR.XZ archive file from the remote SFTP server.
+func extractTARXZArchive(sftpClient *sftp.Client, remoteFilePath string, destinationDir string) error {
+	remoteFile, err := sftpClient.Open(remoteFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to open remote file: %v", err)
+	}
+	defer remoteFile.Close()
+
+	xzReader, err := xz.NewReader(remoteFile)
+	if err != nil {
+		return fmt.Errorf("failed to create XZ reader: %v", err)
+	}
+
+	tarReader := tar.NewReader(xzReader)
+
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read TAR header: %v", err)
+		}
+
+		destFilePath := filepath.Join(destinationDir, header.Name)
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			err := sftpClient.MkdirAll(destFilePath)
+			if err != nil {
+				return fmt.Errorf("failed to create directory: %v", err)
+			}
+		case tar.TypeReg:
+			destFile, err := sftpClient.Create(destFilePath)
+			if err != nil {
+				return fmt.Errorf("failed to create file: %v", err)
+			}
+
+			_, err = io.Copy(destFile, tarReader)
+			if err != nil {
+				destFile.Close()
+				return fmt.Errorf("failed to extract file: %v", err)
+			}
+
+			destFile.Close()
+		}
+	}
+
+	return nil
+}
+
+// Extract BZIP2 archive file from the remote SFTP server.
+func extractBZIP2Archive(sftpClient *sftp.Client, remoteFilePath string, destinationDir string) error {
+	remoteFile, err := sftpClient.Open(remoteFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to open remote file: %v", err)
+	}
+	defer remoteFile.Close()
+
+	bzip2Reader := bzip2.NewReader(remoteFile)
+	tarReader := tar.NewReader(bzip2Reader)
+
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read TAR header: %v", err)
+		}
+
+		destFilePath := filepath.Join(destinationDir, header.Name)
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			err := sftpClient.MkdirAll(destFilePath)
+			if err != nil {
+				return fmt.Errorf("failed to create directory: %v", err)
+			}
+		case tar.TypeReg:
+			destFile, err := sftpClient.Create(destFilePath)
+			if err != nil {
+				return fmt.Errorf("failed to create file: %v", err)
+			}
+
+			_, err = io.Copy(destFile, tarReader)
+			if err != nil {
+				destFile.Close()
+				return fmt.Errorf("failed to extract file: %v", err)
+			}
+
+			destFile.Close()
+		}
+	}
+
+	return nil
+}
+
+// Extract ZIP archive file from the remote SFTP server.
+func extractZIPArchive(sftpClient *sftp.Client, remoteFilePath string, destinationDir string) error {
+	remoteFile, err := sftpClient.Open(remoteFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to open remote file: %v", err)
+	}
+	defer remoteFile.Close()
+
+	remoteFileInfo, err := sftpClient.Stat(remoteFilePath)
+	if err != nil {
+		return err
+	}
+
+	zipReader, err := zip.NewReader(remoteFile, remoteFileInfo.Size())
+	if err != nil {
+		return fmt.Errorf("failed to create zip reader: %v", err)
+	}
+
+	for _, file := range zipReader.File {
+		destFilePath := filepath.Join(destinationDir, file.Name)
+
+		if file.FileInfo().IsDir() {
+			err := sftpClient.MkdirAll(destFilePath)
+			if err != nil {
+				return fmt.Errorf("failed to create directory: %v", err)
+			}
+			continue
+		}
+
+		destFile, err := sftpClient.Create(destFilePath)
+		if err != nil {
+			return fmt.Errorf("failed to create file: %v", err)
+		}
+		defer destFile.Close()
+
+		srcFile, err := sftpClient.Open(file.Name)
+		if err != nil {
+			return fmt.Errorf("failed to open file inside ZIP: %v", err)
+		}
+		defer srcFile.Close()
+
+		_, err = io.Copy(destFile, srcFile)
+		if err != nil {
+			return fmt.Errorf("failed to extract file from ZIP: %v", err)
+		}
+	}
+
+	return nil
 }
