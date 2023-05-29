@@ -121,6 +121,36 @@ func (s *Server) internalInstall() error {
 
 	// Avoid blocking the whole process
 	go func() {
+		services := s.Environment.GetServiceDetails()
+		if len(services) > 0 {
+			name := fmt.Sprintf("kuber-%s-tcp", s.ID())
+			for _, svc := range services {
+				if svc.Name != name {
+					continue
+				}
+
+				ip := svc.Spec.ClusterIP
+				port := config.Get().System.Sftp.Port
+
+				switch svc.Spec.Type {
+				case "LoadBalancer":
+					if len(svc.Status.LoadBalancer.Ingress) > 0 {
+						ip = svc.Status.LoadBalancer.Ingress[0].IP
+						if len(svc.Spec.Ports) > 0 {
+							port = int(svc.Spec.Ports[0].Port)
+						}
+					}
+				case "NodePort":
+					if len(svc.Spec.Ports) > 0 {
+						port = int(svc.Spec.Ports[0].NodePort)
+					}
+				}
+
+				if err := s.fs.SetManager(fmt.Sprintf("%s:%v", ip, port)); err != nil {
+					return
+				}
+			}
+		}
 		s.Log().Info("booting server SFTP process for the first time after installation")
 		if err := s.Environment.CreateSFTP(s.Context()); err != nil {
 			return
@@ -433,33 +463,36 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		ip.Server.Log().WithField("error", err).Warn("failed to create configmap")
 	}
 
-	if deleteFiles {
-		pvc := &corev1.PersistentVolumeClaim{
-			TypeMeta: metav1.TypeMeta{
-				Kind:       "PersistentVolumeClaim",
-				APIVersion: "v1",
+	pvc := &corev1.PersistentVolumeClaim{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "PersistentVolumeClaim",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      ip.Server.ID() + "-pvc",
+			Namespace: config.Get().Cluster.Namespace,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{
+				corev1.PersistentVolumeAccessMode("ReadWriteOnce"),
 			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      ip.Server.ID() + "-pvc",
-				Namespace: config.Get().Cluster.Namespace,
-			},
-			Spec: corev1.PersistentVolumeClaimSpec{
-				AccessModes: []corev1.PersistentVolumeAccessMode{
-					corev1.PersistentVolumeAccessMode("ReadWriteOnce"),
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					"storage": *resource.NewQuantity(ip.Server.DiskSpace(), resource.BinarySI),
 				},
-				Resources: corev1.ResourceRequirements{
-					Requests: corev1.ResourceList{
-						"storage": *resource.NewQuantity(ip.Server.DiskSpace(), resource.BinarySI),
-					},
-				},
-				StorageClassName: &[]string{config.Get().Cluster.StorageClass}[0],
 			},
-		}
+			StorageClassName: &[]string{config.Get().Cluster.StorageClass}[0],
+		},
+	}
 
-		_, err = ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Create(context.TODO(), pvc, metav1.CreateOptions{})
-		if err != nil {
-			return "", err
-		}
+	// Override server storage class if defined
+	if len(ip.Server.cfg.StorageClass) != 0 {
+		pvc.Spec.StorageClassName = &ip.Server.cfg.StorageClass
+	}
+
+	_, err = ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Create(context.TODO(), pvc, metav1.CreateOptions{})
+	if err != nil && !errors.IsAlreadyExists(err) {
+		return "", err
 	}
 
 	pod := &corev1.Pod{

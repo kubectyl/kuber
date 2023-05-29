@@ -14,6 +14,7 @@ type Settings struct {
 	Labels             map[string]string
 	ConfigurationFiles []parser.ConfigurationFile
 	NodeSelectors      map[string]string
+	StorageClass       string
 }
 
 // Defines the actual configuration struct for the environment with all of the settings
