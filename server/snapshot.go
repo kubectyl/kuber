@@ -9,6 +9,7 @@ import (
 	"github.com/apex/log"
 	"github.com/docker/docker/client"
 
+	"github.com/kubectyl/kuber/config"
 	"github.com/kubectyl/kuber/environment"
 	"github.com/kubectyl/kuber/remote"
 	"github.com/kubectyl/kuber/server/snapshot"
@@ -139,7 +140,14 @@ func (s *Server) RestoreBackup(b snapshot.BackupInterface, reader io.ReadCloser)
 	// Attempt to restore the snapshot to the server by running through each entry
 	// in the file one at a time and writing them to the disk.
 	s.Log().Debug("starting process for snapshot restoration")
-	err = b.Restore(s.Context(), s.ID(), s.DiskSpace(), nil)
+
+	storageClass := config.Get().Cluster.Namespace
+	// Override storage class
+	if len(s.cfg.StorageClass) > 0 {
+		storageClass = s.cfg.StorageClass
+	}
+
+	err = b.Restore(s.Context(), s.ID(), s.DiskSpace(), storageClass, nil)
 
 	return errors.WithStackIf(err)
 }

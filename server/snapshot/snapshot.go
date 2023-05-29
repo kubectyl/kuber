@@ -46,7 +46,7 @@ type BackupInterface interface {
 	// Restore is called when a backup is ready to be restored to the disk from
 	// the given source. Not every backup implementation will support this nor
 	// will every implementation require a reader be provided.
-	Restore(context.Context, string, int64, RestoreCallback) error
+	Restore(context.Context, string, int64, string, RestoreCallback) error
 }
 
 type Backup struct {

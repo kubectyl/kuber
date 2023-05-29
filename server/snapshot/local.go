@@ -122,7 +122,7 @@ func (b *LocalBackup) Generate(ctx context.Context, sid, ignore string) (*Archiv
 
 // Restore will walk over the archive and call the callback function for each
 // file encountered.
-func (b *LocalBackup) Restore(ctx context.Context, sid string, disk int64, callback RestoreCallback) error {
+func (b *LocalBackup) Restore(ctx context.Context, sId string, disk int64, storageClass string, callback RestoreCallback) error {
 	cfg := config.Get().Cluster
 
 	snapshot, err := b.snapshotClient.SnapshotV1().VolumeSnapshots(cfg.Namespace).Get(context.Background(), b.Identifier(), metav1.GetOptions{})
@@ -136,7 +136,7 @@ func (b *LocalBackup) Restore(ctx context.Context, sid string, disk int64, callb
 			APIVersion: "v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      sid + "-pvc",
+			Name:      sId + "-pvc",
 			Namespace: config.Get().Cluster.Namespace,
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
@@ -148,7 +148,7 @@ func (b *LocalBackup) Restore(ctx context.Context, sid string, disk int64, callb
 					"storage": *resource.NewQuantity(disk, resource.BinarySI),
 				},
 			},
-			StorageClassName: &[]string{config.Get().Cluster.StorageClass}[0],
+			StorageClassName: &storageClass,
 		},
 	}
 
@@ -156,7 +156,7 @@ func (b *LocalBackup) Restore(ctx context.Context, sid string, disk int64, callb
 		var zero int64 = 0
 		policy := metav1.DeletePropagationForeground
 
-		err = b.clientset.CoreV1().Pods(cfg.Namespace).Delete(context.Background(), sid, metav1.DeleteOptions{
+		err = b.clientset.CoreV1().Pods(cfg.Namespace).Delete(context.Background(), sId, metav1.DeleteOptions{
 			GracePeriodSeconds: &zero,
 			PropagationPolicy:  &policy,
 		})
@@ -165,7 +165,7 @@ func (b *LocalBackup) Restore(ctx context.Context, sid string, disk int64, callb
 		}
 
 		err = wait.PollImmediate(time.Second, 5*time.Minute, func() (bool, error) {
-			_, err := b.clientset.CoreV1().Pods(cfg.Namespace).Get(context.Background(), sid, metav1.GetOptions{})
+			_, err := b.clientset.CoreV1().Pods(cfg.Namespace).Get(context.Background(), sId, metav1.GetOptions{})
 			if err != nil && !errors.IsNotFound(err) {
 				return false, err
 			}
@@ -175,7 +175,7 @@ func (b *LocalBackup) Restore(ctx context.Context, sid string, disk int64, callb
 			return err
 		}
 
-		err = b.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Delete(context.Background(), sid+"-pvc", metav1.DeleteOptions{
+		err = b.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Delete(context.Background(), sId+"-pvc", metav1.DeleteOptions{
 			GracePeriodSeconds: &zero,
 			PropagationPolicy:  &policy,
 		})
@@ -184,7 +184,7 @@ func (b *LocalBackup) Restore(ctx context.Context, sid string, disk int64, callb
 		}
 
 		err = wait.PollImmediate(time.Second, 5*time.Minute, func() (bool, error) {
-			_, err := b.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Get(context.Background(), sid+"-pvc", metav1.GetOptions{})
+			_, err := b.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Get(context.Background(), sId+"-pvc", metav1.GetOptions{})
 			if err != nil && !errors.IsNotFound(err) {
 				return false, err
 			}
