@@ -58,6 +58,8 @@ type Configuration struct {
 
 	NodeSelectors map[string]string `json:"node_selectors"`
 
+	StorageClass string `json:"storage_class"`
+
 	Container struct {
 		// Defines the Docker image that will be used for this server
 		Image string `json:"image,omitempty"`

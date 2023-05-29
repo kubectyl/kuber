@@ -31,6 +31,7 @@ func (s *Server) SyncWithEnvironment() {
 		Limits:             cfg.Build,
 		ConfigurationFiles: s.ProcessConfiguration().ConfigurationFiles,
 		NodeSelectors:      cfg.NodeSelectors,
+		StorageClass:       cfg.StorageClass,
 	})
 
 	// For Kubernetes specific environments we also want to update the configured image

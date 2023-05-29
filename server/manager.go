@@ -210,6 +210,7 @@ func (m *Manager) InitServer(data remote.ServerConfigurationResponse) (*Server, 
 		Labels:             s.cfg.Labels,
 		ConfigurationFiles: s.ProcessConfiguration().ConfigurationFiles,
 		NodeSelectors:      s.cfg.NodeSelectors,
+		StorageClass:       s.cfg.StorageClass,
 	}
 
 	envCfg := environment.NewConfiguration(settings, s.GetEnvironmentVariables())
