@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"regexp"
 	"strconv"
 	"sync"
@@ -89,12 +90,12 @@ func (s *Server) StartEventListeners() {
 	s.Environment.Events().On(c)
 	s.Environment.SetLogCallback(s.processConsoleOutputEvent)
 
-	go func() {
-		if err := s.Environment.WatchPodEvents(s.Context()); err != nil {
+	go func(ctx context.Context) {
+		if err := s.Environment.WatchPodEvents(ctx); err != nil {
 			s.Log().WithField("error", err).Warn("failed to watch pod events")
 			return
 		}
-	}()
+	}(s.Context())
 
 	go func() {
 		for {

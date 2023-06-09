@@ -141,7 +141,7 @@ func (s *Server) RestoreBackup(b snapshot.BackupInterface, reader io.ReadCloser)
 	// in the file one at a time and writing them to the disk.
 	s.Log().Debug("starting process for snapshot restoration")
 
-	storageClass := config.Get().Cluster.Namespace
+	storageClass := config.Get().Cluster.StorageClass
 	// Override storage class
 	if len(s.cfg.StorageClass) > 0 {
 		storageClass = s.cfg.StorageClass

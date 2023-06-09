@@ -116,14 +116,6 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 	if err := environment.CreateSftpSecret(); err != nil {
 		log.WithField("error", err).Fatal("failed to create sftp secret")
 	}
-	if err := config.EnsureKubectylUser(); err != nil {
-		log.WithField("error", err).Fatal("failed to create kubectyl system user")
-	}
-	log.WithFields(log.Fields{
-		"username": config.Get().System.Username,
-		"uid":      config.Get().System.User.Uid,
-		"gid":      config.Get().System.User.Gid,
-	}).Info("configured system user successfully")
 	if err := config.EnableLogRotation(); err != nil {
 		log.WithField("error", err).Fatal("failed to configure log rotation on the system")
 		return
@@ -256,7 +248,10 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 
 				// we use goroutine to avoid blocking whole process
 				go func() {
-					if err := s.Environment.CreateSFTP(s.Context()); err != nil {
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+
+					if err := s.Environment.CreateSFTP(ctx, cancel); err != nil {
 						log.WithField("error", err).Warn("failed to create server SFTP pod")
 					}
 				}()
@@ -301,11 +296,6 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 	// Ensure the archive directory exists.
 	if err := os.MkdirAll(sys.ArchiveDirectory, 0o755); err != nil {
 		log.WithField("error", err).Error("failed to create archive directory")
-	}
-
-	// Ensure the backup directory exists.
-	if err := os.MkdirAll(sys.BackupDirectory, 0o755); err != nil {
-		log.WithField("error", err).Error("failed to create backup directory")
 	}
 
 	autotls, _ := cmd.Flags().GetBool("auto-tls")

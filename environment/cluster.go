@@ -69,25 +69,11 @@ func Cluster() (c *rest.Config, clientset *kubernetes.Clientset, err error) {
 		c.TLSClientConfig.KeyData = keyData
 	}
 
-	tokenFile := "/var/run/secrets/kubernetes.io/serviceaccount/token"
-
-	_, err = os.Stat(tokenFile)
-	if err == nil {
-		token, err := os.ReadFile(tokenFile)
+	// Automatic setup of the Kubernetes client's connection ensuring secure communication.
+	if sa := os.Getenv("KUBECONFIG_IN_CLUSTER"); sa == "true" {
+		c, err = rest.InClusterConfig()
 		if err != nil {
 			panic(err)
-		}
-
-		c.Host = os.Getenv("KUBERNETES_SERVICE_HOST")
-		c.BearerToken = string(token)
-
-		if !cfg.Insecure {
-			caData, err = os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
-			if err != nil {
-				fmt.Printf("Error reading certificate authority data: %v\n", err)
-			} else {
-				c.TLSClientConfig.CAData = caData
-			}
 		}
 	}
 
@@ -109,7 +95,7 @@ func CreateSftpConfigmap() error {
 	tempDir := cfg.System.TmpDirectory
 	tempFile := filepath.Join(tempDir, "sftp.yaml")
 
-	data := map[string]interface{}{
+	yamlData, err := yaml.Marshal(map[string]interface{}{
 		"debug":    cfg.Debug,
 		"token_id": cfg.AuthenticationTokenId,
 		"token":    cfg.AuthenticationToken,
@@ -120,9 +106,7 @@ func CreateSftpConfigmap() error {
 		},
 		"remote":       cfg.PanelLocation,
 		"remote_query": cfg.RemoteQuery,
-	}
-
-	yamlData, err := yaml.Marshal(&data)
+	})
 	if err != nil {
 		return err
 	}

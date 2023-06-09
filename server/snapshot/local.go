@@ -25,7 +25,7 @@ type LocalBackup struct {
 
 var _ BackupInterface = (*LocalBackup)(nil)
 
-func NewLocal(snapshotClient *snapshotclientset.Clientset, client remote.Client, clientset *kubernetes.Clientset, uuid string, ignore string) *LocalBackup {
+func NewLocal(snapshotClient *snapshotclientset.Clientset, client remote.Client, clientset *kubernetes.Clientset, uuid string) *LocalBackup {
 	return &LocalBackup{
 		Backup{
 			snapshotClient: snapshotClient,
@@ -39,7 +39,7 @@ func NewLocal(snapshotClient *snapshotclientset.Clientset, client remote.Client,
 // LocateLocal finds the backup for a server and returns the local path. This
 // will obviously only work if the backup was created as a local backup.
 func LocateLocal(snapshotClient *snapshotclientset.Clientset, client remote.Client, clientset *kubernetes.Clientset, uuid string) (*LocalBackup, error) {
-	b := NewLocal(snapshotClient, client, clientset, uuid, "")
+	b := NewLocal(snapshotClient, client, clientset, uuid)
 
 	return b, nil
 }
@@ -125,7 +125,7 @@ func (b *LocalBackup) Generate(ctx context.Context, sid, ignore string) (*Archiv
 func (b *LocalBackup) Restore(ctx context.Context, sId string, disk int64, storageClass string, callback RestoreCallback) error {
 	cfg := config.Get().Cluster
 
-	snapshot, err := b.snapshotClient.SnapshotV1().VolumeSnapshots(cfg.Namespace).Get(context.Background(), b.Identifier(), metav1.GetOptions{})
+	snapshot, err := b.snapshotClient.SnapshotV1().VolumeSnapshots(cfg.Namespace).Get(ctx, b.Identifier(), metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -153,42 +153,53 @@ func (b *LocalBackup) Restore(ctx context.Context, sId string, disk int64, stora
 	}
 
 	if snapshot.Status != nil {
-		var zero int64 = 0
+		var seconds int64 = 30
 		policy := metav1.DeletePropagationForeground
 
-		err = b.clientset.CoreV1().Pods(cfg.Namespace).Delete(context.Background(), sId, metav1.DeleteOptions{
-			GracePeriodSeconds: &zero,
+		err = b.clientset.CoreV1().Pods(cfg.Namespace).DeleteCollection(ctx, metav1.DeleteOptions{
+			GracePeriodSeconds: &seconds,
+			PropagationPolicy:  &policy,
+		}, metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("Service=Kubectyl,uuid=%s", sId),
+		})
+		if err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+
+		if err := wait.PollUntilWithContext(ctx, 3*time.Second, func(ctx context.Context) (bool, error) {
+			pods, err := b.clientset.CoreV1().Pods(cfg.Namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: fmt.Sprintf("Service=Kubectyl,uuid=%s", sId),
+			})
+			if err != nil {
+				return false, err
+			}
+
+			if len(pods.Items) == 0 {
+				return true, nil
+			}
+
+			return false, nil
+		}); err != nil {
+			return err
+		}
+
+		err = b.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Delete(ctx, pvc.Name, metav1.DeleteOptions{
+			GracePeriodSeconds: &seconds,
 			PropagationPolicy:  &policy,
 		})
 		if err != nil && !errors.IsNotFound(err) {
 			return err
 		}
 
-		err = wait.PollImmediate(time.Second, 5*time.Minute, func() (bool, error) {
-			_, err := b.clientset.CoreV1().Pods(cfg.Namespace).Get(context.Background(), sId, metav1.GetOptions{})
+		err = wait.PollUntilWithContext(ctx, 3*time.Second, func(ctx context.Context) (bool, error) {
+			_, err := b.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{})
 			if err != nil && !errors.IsNotFound(err) {
 				return false, err
 			}
-			return true, nil
-		})
-		if err != nil {
-			return err
-		}
-
-		err = b.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Delete(context.Background(), sId+"-pvc", metav1.DeleteOptions{
-			GracePeriodSeconds: &zero,
-			PropagationPolicy:  &policy,
-		})
-		if err != nil && !errors.IsNotFound(err) {
-			return err
-		}
-
-		err = wait.PollImmediate(time.Second, 5*time.Minute, func() (bool, error) {
-			_, err := b.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Get(context.Background(), sId+"-pvc", metav1.GetOptions{})
-			if err != nil && !errors.IsNotFound(err) {
-				return false, err
+			if errors.IsNotFound(err) {
+				return true, nil
 			}
-			return true, nil
+			return false, nil
 		})
 		if err != nil {
 			return err
@@ -213,14 +224,14 @@ func (b *LocalBackup) Restore(ctx context.Context, sId string, disk int64, stora
 			},
 		}
 
-		_, err = b.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Create(context.Background(), restoredPVC, metav1.CreateOptions{})
+		_, err = b.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Create(ctx, restoredPVC, metav1.CreateOptions{})
 		if err != nil {
 			return err
 		}
 
 		// Wait for the PVC to become available.
-		err = wait.PollImmediate(time.Second, 5*time.Minute, func() (bool, error) {
-			pvc, err := b.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Get(context.Background(), restoredPVC.Name, metav1.GetOptions{})
+		err = wait.PollUntilWithContext(ctx, 3*time.Second, func(ctx context.Context) (bool, error) {
+			pvc, err := b.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Get(ctx, restoredPVC.Name, metav1.GetOptions{})
 			if err != nil {
 				return false, err
 			}

@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"time"
 
-	"emperror.dev/errors"
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/goccy/go-json"
 )
@@ -54,21 +53,18 @@ func (fs *Filesystem) Stat(p string) (Stat, error) {
 }
 
 func (fs *Filesystem) unsafeStat(p string) (Stat, error) {
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		return Stat{}, err
-	}
-	if connection == nil || connection.sftpClient == nil {
-		return Stat{}, errors.New("client connection is invalid")
-	}
-	s, err := connection.sftpClient.Stat(p)
+	s, err := fs.manager.Stat(p)
 	if err != nil {
 		return Stat{}, err
 	}
 
+	if s == nil {
+		return Stat{}, nil
+	}
+
 	var m *mimetype.MIME
 	if !s.IsDir() {
-		f, err := connection.sftpClient.Open(p)
+		f, err := fs.manager.Open(p)
 		if err != nil {
 			return Stat{}, err
 		}

@@ -232,7 +232,7 @@ func (s *Server) SyncWithConfiguration(cfg remote.ServerConfigurationResponse) e
 }
 
 // Reads the log file for a server up to a specified number of bytes.
-func (s *Server) ReadLogfile(len int) ([]string, error) {
+func (s *Server) ReadLogfile(len int64) ([]string, error) {
 	return s.Environment.Readlog(len)
 }
 
@@ -298,7 +298,11 @@ func (s *Server) OnStateChange() {
 			if err := server.handleServerCrash(); err != nil {
 				if IsTooFrequentCrashError(err) {
 					server.Log().Info("did not restart server after crash; occurred too soon after the last")
-					if err := s.Environment.CreateSFTP(context.Background()); err != nil {
+
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+
+					if err := s.Environment.CreateSFTP(ctx, cancel); err != nil {
 						server.Log().WithField("error", err).Error("failed to start server SFTP")
 					}
 				} else {

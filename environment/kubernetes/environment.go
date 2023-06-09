@@ -3,7 +3,6 @@ package kubernetes
 import (
 	"context"
 	"fmt"
-	"io"
 	"math/rand"
 	"strings"
 	"sync"
@@ -56,9 +55,6 @@ type Environment struct {
 	// Controls the hijacked response stream which exists only when we're attached to
 	// the running container instance.
 	stream remotecommand.Executor
-
-	// Holds the stats stream used by the polling commands so that we can easily close it out.
-	stats io.ReadCloser
 
 	emitter *events.Bus
 
@@ -208,14 +204,16 @@ func (e *Environment) CreateServiceWithUniquePort() (int, error) {
 }
 
 func (e *Environment) WatchPodEvents(ctx context.Context) error {
+	cfg := config.Get().Cluster
+
 	eventListWatcher := &cache.ListWatch{
 		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 			options.FieldSelector = fmt.Sprintf("involvedObject.kind=Pod,involvedObject.name=%s", e.Id)
-			return e.client.CoreV1().Events(config.Get().Cluster.Namespace).List(ctx, options)
+			return e.client.CoreV1().Events(cfg.Namespace).List(ctx, options)
 		},
 		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 			options.FieldSelector = fmt.Sprintf("involvedObject.kind=Pod,involvedObject.name=%s", e.Id)
-			return e.client.CoreV1().Events(config.Get().Cluster.Namespace).Watch(ctx, options)
+			return e.client.CoreV1().Events(cfg.Namespace).Watch(ctx, options)
 		},
 	}
 

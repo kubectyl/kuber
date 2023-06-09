@@ -15,6 +15,7 @@ import (
 	errors2 "emperror.dev/errors"
 	"github.com/apex/log"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/utils/pointer"
 
 	"github.com/kubectyl/kuber/config"
 	"github.com/kubectyl/kuber/environment"
@@ -146,13 +147,15 @@ func (s *Server) internalInstall() error {
 					}
 				}
 
-				if err := s.fs.SetManager(fmt.Sprintf("%s:%v", ip, port)); err != nil {
-					return
-				}
+				s.fs.SetManager(fmt.Sprintf("%s:%v", ip, port))
 			}
 		}
 		s.Log().Info("booting server SFTP process for the first time after installation")
-		if err := s.Environment.CreateSFTP(s.Context()); err != nil {
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		if err := s.Environment.CreateSFTP(ctx, cancel); err != nil {
 			return
 		}
 	}()
@@ -481,7 +484,7 @@ func (ip *InstallationProcess) Execute() (string, error) {
 					"storage": *resource.NewQuantity(ip.Server.DiskSpace(), resource.BinarySI),
 				},
 			},
-			StorageClassName: &[]string{config.Get().Cluster.StorageClass}[0],
+			StorageClassName: pointer.String(config.Get().Cluster.StorageClass),
 		},
 	}
 
@@ -525,19 +528,19 @@ func (ip *InstallationProcess) Execute() (string, error) {
 							LocalObjectReference: corev1.LocalObjectReference{
 								Name: ip.Server.ID() + "-installer",
 							},
-							DefaultMode: &[]int32{int32(0755)}[0],
+							DefaultMode: pointer.Int32(0755),
 						},
 					},
 				},
+			},
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsUser:    pointer.Int64(1000),
+				RunAsNonRoot: pointer.Bool(true),
 			},
 			Containers: []corev1.Container{
 				{
 					Name:  "installer",
 					Image: ip.Script.ContainerImage,
-					SecurityContext: &corev1.SecurityContext{
-						AllowPrivilegeEscalation: &[]bool{false}[0],
-						RunAsUser:                &[]int64{int64(0)}[0],
-					},
 					Command: []string{
 						"/mnt/install/install.sh",
 					},
@@ -583,11 +586,12 @@ func (ip *InstallationProcess) Execute() (string, error) {
 	}
 
 	cfg := config.Get()
-	securityContext := pod.Spec.Containers[0].SecurityContext
-	if cfg.System.User.Rootless.Enabled {
-		securityContext.RunAsNonRoot = &[]bool{false}[0]
-		securityContext.RunAsUser = &[]int64{int64(cfg.System.User.Rootless.ContainerUID)}[0]
-		securityContext.RunAsGroup = &[]int64{int64(cfg.System.User.Rootless.ContainerGID)}[0]
+
+	// Configure pod spec for restricted security standard
+	if cfg.Cluster.RestrictedPodSecurityStandard {
+		if err := ip.Server.Environment.ConfigurePodSpecForRestrictedStandard(&pod.Spec); err != nil {
+			return "", err
+		}
 	}
 
 	ip.Server.Log().WithField("install_script", ip.tempDir()+"/install.sh").Info("creating install container for server process")
@@ -611,45 +615,63 @@ func (ip *InstallationProcess) Execute() (string, error) {
 	//
 	// If there is an error during the streaming output just report it and do nothing else, the
 	// install can still run, the console just won't have any output.
-	go func(id string) {
+	go func(ctx context.Context, id string) {
 		ip.Server.Events().Publish(DaemonMessageEvent, "Starting installation process, this could take a few minutes...")
 
-		err = wait.PollInfinite(time.Second, func() (bool, error) {
-			pod, err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.TODO(), ip.Server.ID()+"-installer", metav1.GetOptions{})
+		err = wait.PollUntilWithContext(ctx, time.Second, func(ctx context.Context) (bool, error) {
+			pod, err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(ctx, ip.Server.ID()+"-installer", metav1.GetOptions{})
 			if err != nil {
 				return false, err
 			}
 
-			switch pod.Status.Phase {
-			case corev1.PodRunning:
-				return true, nil
-			case corev1.PodFailed, corev1.PodSucceeded:
-				return false, nil
+			for _, containerStatus := range pod.Status.ContainerStatuses {
+				if containerStatus.Name != "installer" {
+					continue
+				}
+				switch {
+				case containerStatus.State.Running != nil:
+					return true, nil
+				case containerStatus.State.Waiting != nil && containerStatus.State.Waiting.Reason != "ContainerCreating":
+					return false, errors2.New(containerStatus.State.Waiting.Reason)
+				}
+
 			}
 			return false, nil
 		})
 		if err != nil {
 			ip.Server.Log().WithField("error", err).Warn("pod never entered running phase")
+			return
 		}
 
 		if err := ip.StreamOutput(ctx, id); err != nil {
 			ip.Server.Log().WithField("error", err).Warn("error connecting to server install stream output")
+			return
 		}
-	}(string(r.UID))
+	}(ctx, string(r.UID))
 
-	err = wait.PollInfinite(time.Second, func() (bool, error) {
-		pod, err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(context.TODO(), ip.Server.ID()+"-installer", metav1.GetOptions{})
+	err = wait.PollUntilWithContext(ctx, time.Second, func(ctx context.Context) (bool, error) {
+		pod, err := ip.client.CoreV1().Pods(config.Get().Cluster.Namespace).Get(ctx, ip.Server.ID()+"-installer", metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
 
 		switch pod.Status.Phase {
+		case corev1.PodRunning:
+			return false, nil
+		case corev1.PodPending:
+			return false, nil
 		case corev1.PodSucceeded:
 			return true, nil
 		case corev1.PodFailed:
-			return false, nil
+			for _, containerStatus := range pod.Status.ContainerStatuses {
+				if containerStatus.Name == "installer" && containerStatus.State.Terminated != nil {
+					return false, errors2.New(containerStatus.State.Terminated.Message)
+				}
+			}
+			return true, nil
+		default:
+			return false, errors2.New("unknown pod status")
 		}
-		return false, nil
 	})
 	// Once the container has stopped running we can mark the install process as being completed.
 	if err == nil {
