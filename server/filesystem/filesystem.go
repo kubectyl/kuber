@@ -83,9 +83,10 @@ func New(root string, size int64, denylist []string, addr string) *Filesystem {
 	}
 }
 
-func (fs *Filesystem) SetManager(addr string) error {
+func (fs *Filesystem) SetManager(addr string) {
+	fs.mu.Lock()
 	fs.manager = NewBasicSFTPManager(addr, clientConfig)
-	return nil
+	fs.mu.Unlock()
 }
 
 // Path returns the root path for the Filesystem instance.
@@ -99,12 +100,7 @@ func (fs *Filesystem) File(p string) (*sftp.File, os.FileInfo, error) {
 	if err != nil {
 		return nil, Stat{}, errors.WithStackIf(err)
 	}
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		fmt.Println(err)
-		return nil, nil, err
-	}
-	st, err := connection.sftpClient.Stat(cleaned)
+	st, err := fs.manager.Stat(cleaned)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, Stat{}, newFilesystemError(ErrNotExist, err)
@@ -114,7 +110,7 @@ func (fs *Filesystem) File(p string) (*sftp.File, os.FileInfo, error) {
 	if st.IsDir() {
 		return nil, Stat{}, newFilesystemError(ErrCodeIsDirectory, nil)
 	}
-	f, err := connection.sftpClient.Open(cleaned)
+	f, err := fs.manager.Open(cleaned)
 	if err != nil {
 		return nil, Stat{}, errors.WithStackIf(err)
 	}
@@ -130,13 +126,7 @@ func (fs *Filesystem) Touch(p string, flag int) (*sftp.File, error) {
 		return nil, err
 	}
 
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		fmt.Println(err)
-		return nil, err
-	}
-
-	f, err := connection.sftpClient.OpenFile(cleaned, flag)
+	f, err := fs.manager.OpenFile(cleaned, flag)
 	if err == nil {
 		return f, nil
 	}
@@ -145,10 +135,10 @@ func (fs *Filesystem) Touch(p string, flag int) (*sftp.File, error) {
 		return nil, errors.Wrap(err, "server/filesystem: touch: failed to open file handle")
 	}
 	// Only create and chown the directory if it doesn't exist.
-	if _, err := connection.sftpClient.Stat(filepath.Dir(cleaned)); errors.Is(err, os.ErrNotExist) {
+	if _, err := fs.manager.Stat(filepath.Dir(cleaned)); errors.Is(err, os.ErrNotExist) {
 		// Create the path leading up to the file we're trying to create, setting the final perms
 		// on it as we go.
-		if err := connection.sftpClient.MkdirAll(filepath.Dir(cleaned)); err != nil {
+		if err := fs.manager.MkdirAll(filepath.Dir(cleaned)); err != nil {
 			return nil, errors.Wrap(err, "server/filesystem: touch: failed to create directory tree")
 		}
 		if err := fs.Chown(filepath.Dir(cleaned)); err != nil {
@@ -175,16 +165,10 @@ func (fs *Filesystem) Writefile(p string, r io.Reader) error {
 		return err
 	}
 
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		fmt.Println(err)
-		return err
-	}
-
 	var currentSize int64
 	// If the file does not exist on the system already go ahead and create the pathway
 	// to it and an empty file. We'll then write to it later on after this completes.
-	stat, err := connection.sftpClient.Stat(cleaned)
+	stat, err := fs.manager.Stat(cleaned)
 	if err != nil && !os.IsNotExist(err) {
 		return errors.Wrap(err, "server/filesystem: writefile: failed to stat file")
 	} else if err == nil {
@@ -226,12 +210,7 @@ func (fs *Filesystem) CreateDirectory(name string, p string) error {
 	if err != nil {
 		return err
 	}
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		fmt.Println(err)
-		return err
-	}
-	return connection.sftpClient.MkdirAll(cleaned)
+	return fs.manager.MkdirAll(cleaned)
 }
 
 // Rename moves (or renames) a file or directory.
@@ -246,15 +225,9 @@ func (fs *Filesystem) Rename(from string, to string) error {
 		return errors.WithStack(err)
 	}
 
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		fmt.Println(err)
-		return err
-	}
-
 	// If the target file or directory already exists the rename function will fail, so just
 	// bail out now.
-	if _, err := connection.sftpClient.Stat(cleanedTo); err == nil {
+	if _, err := fs.manager.Stat(cleanedTo); err == nil {
 		return os.ErrExist
 	}
 
@@ -266,12 +239,12 @@ func (fs *Filesystem) Rename(from string, to string) error {
 	// Ensure that the directory we're moving into exists correctly on the system. Only do this if
 	// we're not at the root directory level.
 	if d != fs.Path() {
-		if mkerr := connection.sftpClient.MkdirAll(d); mkerr != nil {
+		if mkerr := fs.manager.MkdirAll(d); mkerr != nil {
 			return errors.WithMessage(mkerr, "failed to create directory structure for file rename")
 		}
 	}
 
-	if err := connection.sftpClient.Rename(cleanedFrom, cleanedTo); err != nil {
+	if err := fs.manager.Rename(cleanedFrom, cleanedTo); err != nil {
 		return errors.WithStack(err)
 	}
 	return nil
@@ -291,23 +264,14 @@ func (fs *Filesystem) Chown(path string) error {
 		return nil
 	}
 
-	uid := config.Get().System.User.Uid
-	gid := config.Get().System.User.Gid
-
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		fmt.Println(err)
-		return err
-	}
-
 	// Start by just chowning the initial path that we received.
-	if err := connection.sftpClient.Chown(cleaned, uid, gid); err != nil {
+	if err := fs.manager.Chown(cleaned); err != nil {
 		return errors.Wrap(err, "server/filesystem: chown: failed to chown path")
 	}
 
 	// If this is not a directory we can now return from the function, there is nothing
 	// left that we need to do.
-	if st, err := connection.sftpClient.Stat(cleaned); err != nil || !st.IsDir() {
+	if st, err := fs.manager.Stat(cleaned); err != nil || !st.IsDir() {
 		return nil
 	}
 
@@ -327,7 +291,7 @@ func (fs *Filesystem) Chown(path string) error {
 				return nil
 			}
 
-			return connection.sftpClient.Chown(p, uid, gid)
+			return fs.manager.Chown(p)
 		},
 	})
 
@@ -345,13 +309,7 @@ func (fs *Filesystem) Chmod(path string, mode os.FileMode) error {
 		return nil
 	}
 
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		fmt.Println(err)
-		return err
-	}
-
-	if err := connection.sftpClient.Chmod(cleaned, mode); err != nil {
+	if err := fs.manager.Chmod(cleaned, mode); err != nil {
 		return err
 	}
 
@@ -375,16 +333,10 @@ func (fs *Filesystem) findCopySuffix(dir string, name string, extension string) 
 			suffix = " copy " + strconv.Itoa(i)
 		}
 
-		connection, err := fs.manager.GetConnection()
-		if err != nil {
-			fmt.Println(err)
-			return "", err
-		}
-
 		n := name + suffix + extension
 		// If we stat the file and it does not exist that means we're good to create the copy. If it
 		// does exist, we'll just continue to the next loop and try again.
-		if _, err := connection.sftpClient.Stat(path.Join(dir, n)); err != nil {
+		if _, err := fs.manager.Stat(path.Join(dir, n)); err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
 				return "", err
 			}
@@ -408,13 +360,7 @@ func (fs *Filesystem) Copy(p string) error {
 		return err
 	}
 
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		fmt.Println(err)
-		return err
-	}
-
-	s, err := connection.sftpClient.Stat(cleaned)
+	s, err := fs.manager.Stat(cleaned)
 	if err != nil {
 		return err
 	} else if s.IsDir() || !s.Mode().IsRegular() {
@@ -441,7 +387,7 @@ func (fs *Filesystem) Copy(p string) error {
 		name = strings.TrimSuffix(name, ".tar")
 	}
 
-	source, err := connection.sftpClient.Open(cleaned)
+	source, err := fs.manager.Open(cleaned)
 	if err != nil {
 		return err
 	}
@@ -458,15 +404,10 @@ func (fs *Filesystem) Copy(p string) error {
 // TruncateRootDirectory removes _all_ files and directories from a server's
 // data directory and resets the used disk space to zero.
 func (fs *Filesystem) TruncateRootDirectory() error {
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		fmt.Println(err)
+	if err := fs.manager.Remove(fs.Path()); err != nil {
 		return err
 	}
-	if err := connection.sftpClient.Remove(fs.Path()); err != nil {
-		return err
-	}
-	if err := connection.sftpClient.Mkdir(fs.Path()); err != nil {
+	if err := fs.manager.Mkdir(fs.Path()); err != nil {
 		return err
 	}
 	atomic.StoreInt64(&fs.diskUsed, 0)
@@ -496,13 +437,7 @@ func (fs *Filesystem) Delete(p string) error {
 		return errors.New("cannot delete root server directory")
 	}
 
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		fmt.Println(err)
-		return err
-	}
-
-	if st, err := connection.sftpClient.Lstat(resolved); err != nil {
+	if st, err := fs.manager.Lstat(resolved); err != nil {
 		if !os.IsNotExist(err) {
 			fs.error(err).Warn("error while attempting to stat file before deletion")
 		}
@@ -524,36 +459,31 @@ func (fs *Filesystem) Delete(p string) error {
 
 	wg.Wait()
 
-	return connection.sftpClient.Remove(resolved)
+	return fs.manager.Remove(resolved)
 }
 
 func (fs *Filesystem) deleteRecursive(name string) error {
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		fmt.Println(err)
-		return err
-	}
-	entries, err := connection.sftpClient.ReadDir(name)
+	entries, err := fs.manager.ReadDir(name)
 	if err != nil {
 		return errors.Wrap(err, "ReadDir")
 	}
 
 	if len(entries) == 0 {
-		err = connection.sftpClient.RemoveDirectory(name)
+		err = fs.manager.RemoveDirectory(name)
 		if err != nil {
 			return errors.Wrap(err, "RemoveDirectory")
 		}
 	}
 
 	for _, fi := range entries {
-		itemName := connection.sftpClient.Join(name, fi.Name())
+		itemName, _ := fs.manager.Join(name, fi.Name())
 		if fi.IsDir() {
 			err = fs.deleteRecursive(itemName)
 			if err != nil {
 				return errors.Wrap(err, "ReadDir")
 			}
 
-			err = connection.sftpClient.RemoveDirectory(name)
+			err = fs.manager.RemoveDirectory(name)
 			if err != nil {
 				return errors.Wrap(err, "RemoveDirectory")
 			}
@@ -561,7 +491,7 @@ func (fs *Filesystem) deleteRecursive(name string) error {
 			continue
 		}
 
-		err := connection.sftpClient.Remove(itemName)
+		err := fs.manager.Remove(itemName)
 		if err != nil {
 			return errors.Wrap(err, "ReadDir")
 		}
@@ -578,17 +508,7 @@ func (fs *Filesystem) ListDirectory(p string) ([]Stat, error) {
 		return nil, err
 	}
 
-	connection, err := fs.manager.GetConnection()
-	if connection == nil || err != nil {
-		return nil, errors.New("processing error")
-	}
-
-	// Check if the SFTP client connection is valid
-	if connection.sftpClient == nil {
-		return nil, errors.New("client connection is invalid")
-	}
-
-	files, err := connection.sftpClient.ReadDir(cleaned)
+	files, err := fs.manager.ReadDir(cleaned)
 	if err != nil {
 		return nil, err
 	}
@@ -621,7 +541,7 @@ func (fs *Filesystem) ListDirectory(p string) ([]Stat, error) {
 				//
 				// @see https://github.com/pterodactyl/panel/issues/4059
 				if cleanedp != "" && f.Mode()&os.ModeNamedPipe == 0 {
-					file, err := connection.sftpClient.Open(filepath.Join(cleaned, f.Name()))
+					file, err := fs.manager.Open(filepath.Join(cleaned, f.Name()))
 					if err != nil {
 						panic(fmt.Errorf("Error SFTP Open: %s", err))
 					}
@@ -671,13 +591,7 @@ func (fs *Filesystem) Chtimes(path string, atime, mtime time.Time) error {
 		return nil
 	}
 
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		fmt.Println(err)
-		return err
-	}
-
-	if err := connection.sftpClient.Chtimes(cleaned, atime, mtime); err != nil {
+	if err := fs.manager.Chtimes(cleaned, atime, mtime); err != nil {
 		return err
 	}
 

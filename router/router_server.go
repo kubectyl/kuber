@@ -32,7 +32,7 @@ func getServerLogs(c *gin.Context) {
 		l = 100
 	}
 
-	out, err := s.ReadLogfile(l)
+	out, err := s.ReadLogfile(int64(l))
 	if err != nil {
 		middleware.CaptureAndAbort(c, err)
 		return

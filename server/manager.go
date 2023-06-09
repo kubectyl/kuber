@@ -251,9 +251,7 @@ func (m *Manager) InitServer(data remote.ServerConfigurationResponse) (*Server, 
 				}
 			}
 
-			if err := s.fs.SetManager(fmt.Sprintf("%s:%v", ip, port)); err != nil {
-				return nil, err
-			}
+			s.fs.SetManager(fmt.Sprintf("%s:%v", ip, port))
 		}
 	}
 

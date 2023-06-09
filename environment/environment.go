@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/kubectyl/kuber/events"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 )
 
 const (
@@ -93,7 +93,7 @@ type ProcessEnvironment interface {
 	ExitState() (uint32, bool, error)
 
 	// Creates the pod for SFTP server.
-	CreateSFTP(ctx context.Context) error
+	CreateSFTP(ctx context.Context, cancelFunc context.CancelFunc) error
 
 	// Creates the necessary environment for running the server process. For example,
 	// in the Docker environment create will create a new container instance for the
@@ -112,11 +112,11 @@ type ProcessEnvironment interface {
 	SendCommand(string) error
 
 	// Return service details
-	GetServiceDetails() []v1.Service
+	GetServiceDetails() []corev1.Service
 
 	// Reads the log file for the process from the end backwards until the provided
 	// number of lines is met.
-	Readlog(int) ([]string, error)
+	Readlog(int64) ([]string, error)
 
 	// Returns the current state of the environment.
 	State() string
@@ -132,4 +132,6 @@ type ProcessEnvironment interface {
 
 	// SetLogCallback sets the callback that the container's log output will be passed to.
 	SetLogCallback(func([]byte))
+
+	ConfigurePodSpecForRestrictedStandard(*corev1.PodSpec) error
 }
