@@ -156,9 +156,7 @@ func (s *Server) HandlePowerAction(action PowerAction, waitSeconds ...int) error
 					}
 				}
 
-				if err := s.fs.SetManager(fmt.Sprintf("%s:%v", ip, port)); err != nil {
-					return err
-				}
+				s.fs.SetManager(fmt.Sprintf("%s:%v", ip, port))
 			}
 		}
 
@@ -180,9 +178,9 @@ func (s *Server) HandlePowerAction(action PowerAction, waitSeconds ...int) error
 			return err
 		}
 
-		if err := s.Environment.CreateSFTP(s.Context()); err != nil {
-			return err
-		}
+		// if err := s.Environment.CreateSFTP(s.Context()); err != nil {
+		// 	return err
+		// }
 
 		if action == PowerActionStop {
 			return nil
@@ -198,7 +196,11 @@ func (s *Server) HandlePowerAction(action PowerAction, waitSeconds ...int) error
 		if err := s.Environment.Terminate(s.Context()); err != nil {
 			return err
 		}
-		return s.Environment.CreateSFTP(s.Context())
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		return s.Environment.CreateSFTP(ctx, cancel)
 		// return s.Environment.Terminate(s.Context())
 	}
 

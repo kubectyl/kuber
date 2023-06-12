@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
+	"mime/multipart"
 	"net/http"
 	"net/url"
-	"os"
 	"os/exec"
 	"path"
 	"strconv"
@@ -28,7 +30,7 @@ import (
 )
 
 const (
-	DefaultHastebinUrl = "https://ptero.co"
+	DefaultPastebinUrl = "https://pb.kubectyl.org"
 	DefaultLogLines    = 200
 )
 
@@ -36,7 +38,7 @@ var diagnosticsArgs struct {
 	IncludeEndpoints   bool
 	IncludeLogs        bool
 	ReviewBeforeUpload bool
-	HastebinURL        string
+	PastebinURL        string
 	LogLines           int
 }
 
@@ -51,7 +53,7 @@ func newDiagnosticsCommand() *cobra.Command {
 		Run: diagnosticsCmdRun,
 	}
 
-	command.Flags().StringVar(&diagnosticsArgs.HastebinURL, "hastebin-url", DefaultHastebinUrl, "the url of the hastebin instance to use")
+	command.Flags().StringVar(&diagnosticsArgs.PastebinURL, "hastebin-url", DefaultPastebinUrl, "the url of the hastebin instance to use")
 	command.Flags().IntVar(&diagnosticsArgs.LogLines, "log-lines", DefaultLogLines, "the number of log lines to include in the report")
 
 	return command
@@ -77,7 +79,7 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 		{
 			Name: "ReviewBeforeUpload",
 			Prompt: &survey.Confirm{
-				Message: "Do you want to review the collected data before uploading to " + diagnosticsArgs.HastebinURL + "?",
+				Message: "Do you want to review the collected data before uploading to " + diagnosticsArgs.PastebinURL + "?",
 				Help:    "The data, especially the logs, might contain sensitive information, so you should review it. You will be asked again if you want to upload.",
 				Default: true,
 			},
@@ -112,26 +114,16 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 		{"Logs Directory", cfg.System.LogDirectory},
 		{"Data Directory", cfg.System.Data},
 		{"Archive Directory", cfg.System.ArchiveDirectory},
-		{"Backup Directory", cfg.System.BackupDirectory},
 
-		{"Username", cfg.System.Username},
 		{"Server Time", time.Now().Format(time.RFC1123Z)},
 		{"Debug Mode", fmt.Sprintf("%t", cfg.Debug)},
 	}
 
-	table := tablewriter.NewWriter(os.Stdout)
+	table := tablewriter.NewWriter(output)
 	table.SetHeader([]string{"Variable", "Value"})
 	table.SetRowLine(true)
 	table.AppendBulk(data)
 	table.Render()
-
-	printHeader(output, "Docker: Running Containers")
-	c := exec.Command("docker", "ps")
-	if co, err := c.Output(); err == nil {
-		output.Write(co)
-	} else {
-		fmt.Fprint(output, "Couldn't list containers: ", err)
-	}
 
 	printHeader(output, "Latest Kuber Logs")
 	if diagnosticsArgs.IncludeLogs {
@@ -162,16 +154,38 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 	fmt.Println(output.String())
 	fmt.Print("---------------   end of report    ---------------\n\n")
 
-	// upload := !diagnosticsArgs.ReviewBeforeUpload
-	// if !upload {
-	// 	survey.AskOne(&survey.Confirm{Message: "Upload to " + diagnosticsArgs.HastebinURL + "?", Default: false}, &upload)
-	// }
-	// if upload {
-	// 	u, err := uploadToHastebin(diagnosticsArgs.HastebinURL, output.String())
-	// 	if err == nil {
-	// 		fmt.Println("Your report is available here: ", u)
-	// 	}
-	// }
+	upload := !diagnosticsArgs.ReviewBeforeUpload
+	if !upload {
+		survey.AskOne(&survey.Confirm{Message: "Upload to " + diagnosticsArgs.PastebinURL + "?", Default: false}, &upload)
+	}
+	if upload {
+		passwordFunc := func(length int) string {
+			charset := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+			password := make([]byte, length)
+
+			for i := 0; i < length; i++ {
+				password[i] = charset[rand.Intn(len(charset))]
+			}
+
+			return string(password)
+		}
+		rand.Seed(time.Now().UnixNano())
+
+		password := passwordFunc(8)
+		result, err := uploadToPastebin(diagnosticsArgs.PastebinURL, output.String(), password)
+		if err == nil {
+			seconds, err := strconv.Atoi(fmt.Sprintf("%v", result["expire"]))
+			if err != nil {
+				return
+			}
+
+			expireTime := fmt.Sprintf("%d hours, %d minutes, %d seconds", seconds/3600, (seconds%3600)/60, seconds%60)
+
+			fmt.Println("Your report is available here:", result["url"])
+			fmt.Println("Will expire in", expireTime)
+			fmt.Printf("You can edit your pastebin here: %s\n", result["admin"])
+		}
+	}
 }
 
 // func getDockerInfo() (types.Version, types.Info, error) {
@@ -190,31 +204,45 @@ func diagnosticsCmdRun(*cobra.Command, []string) {
 // 	return dockerVersion, dockerInfo, nil
 // }
 
-func uploadToHastebin(hbUrl, content string) (string, error) {
-	r := strings.NewReader(content)
-	u, err := url.Parse(hbUrl)
+func uploadToPastebin(pbURL, content, password string) (map[string]interface{}, error) {
+	payload := &bytes.Buffer{}
+	writer := multipart.NewWriter(payload)
+	writer.WriteField("c", content)
+	writer.WriteField("e", "300")
+	writer.WriteField("s", password)
+	writer.Close()
+
+	u, err := url.Parse(pbURL)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	u.Path = path.Join(u.Path, "documents")
-	res, err := http.Post(u.String(), "plain/text", r)
+
+	req, err := http.NewRequest("POST", u.String(), payload)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	client := &http.Client{}
+	res, err := client.Do(req)
 	if err != nil || res.StatusCode != 200 {
-		fmt.Println("Failed to upload report to ", u.String(), err)
-		return "", err
+		fmt.Println("Failed to upload report to", u.String(), err)
+		return nil, err
 	}
+
 	pres := make(map[string]interface{})
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		fmt.Println("Failed to parse response.", err)
-		return "", err
+		return nil, err
 	}
 	json.Unmarshal(body, &pres)
-	if key, ok := pres["key"].(string); ok {
-		u, _ := url.Parse(hbUrl)
-		u.Path = path.Join(u.Path, key)
-		return u.String(), nil
+	if key, ok := pres["url"].(string); ok {
+		u.Path = key
+		return pres, nil
 	}
-	return "", errors.New("failed to find key in response")
+
+	return nil, errors.New("failed to find key in response")
 }
 
 func redact(s string) string {

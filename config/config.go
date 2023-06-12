@@ -6,11 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
 	"path"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"sync"
 	"text/template"
 	"time"
@@ -21,8 +19,6 @@ import (
 	"github.com/creasty/defaults"
 	"github.com/gbrlsnchs/jwt/v3"
 	"gopkg.in/yaml.v2"
-
-	"github.com/kubectyl/kuber/system"
 )
 
 const DefaultLocation = "/etc/kubectyl/config.yml"
@@ -134,15 +130,9 @@ type SystemConfiguration struct {
 	// Directory where server archives for transferring will be stored.
 	ArchiveDirectory string `default:"/var/lib/kubectyl/archives" yaml:"archive_directory"`
 
-	// Directory where local backups will be stored on the machine.
-	BackupDirectory string `default:"/var/lib/kubectyl/backups" yaml:"backup_directory"`
-
 	// TmpDirectory specifies where temporary files for Kubectyl installation processes
 	// should be created. This supports environments running docker-in-docker.
 	TmpDirectory string `default:"/tmp/kubectyl" yaml:"tmp_directory"`
-
-	// The user that should own all of the server files, and be used for containers.
-	Username string `default:"kubectyl" yaml:"username"`
 
 	// The timezone for this Kuber instance. This is detected by Kuber automatically if possible,
 	// and falls back to UTC if not able to be detected. If you need to set this manually, that
@@ -150,27 +140,6 @@ type SystemConfiguration struct {
 	//
 	// This timezone value is passed into all containers created by Kuber.
 	Timezone string `yaml:"timezone"`
-
-	// Definitions for the user that gets created to ensure that we can quickly access
-	// this information without constantly having to do a system lookup.
-	User struct {
-		// Rootless controls settings related to rootless container daemons.
-		Rootless struct {
-			// Enabled controls whether rootless containers are enabled.
-			Enabled bool `yaml:"enabled" default:"false"`
-			// ContainerUID controls the UID of the user inside the container.
-			// This should likely be set to 0 so the container runs as the user
-			// running Kuber.
-			ContainerUID int `yaml:"container_uid" default:"0"`
-			// ContainerGID controls the GID of the user inside the container.
-			// This should likely be set to 0 so the container runs as the user
-			// running Kuber.
-			ContainerGID int `yaml:"container_gid" default:"0"`
-		} `yaml:"rootless"`
-
-		Uid int `yaml:"uid"`
-		Gid int `yaml:"gid"`
-	} `yaml:"user"`
 
 	// The amount of time in seconds that can elapse before a server's disk space calculation is
 	// considered stale and a re-check should occur. DANGER: setting this value too low can seriously
@@ -202,7 +171,7 @@ type SystemConfiguration struct {
 	EnableLogRotate bool `default:"true" yaml:"enable_log_rotate"`
 
 	// The number of lines to send when a server connects to the websocket.
-	WebsocketLogCount int `default:"150" yaml:"websocket_log_count"`
+	WebsocketLogCount int64 `default:"150" yaml:"websocket_log_count"`
 
 	Sftp SftpConfiguration `yaml:"sftp"`
 
@@ -422,78 +391,6 @@ func WriteToDisk(c *Configuration) error {
 	return nil
 }
 
-// EnsureKubectylUser ensures that the Kubectyl core user exists on the
-// system. This user will be the owner of all data in the root data directory
-// and is used as the user within containers. If files are not owned by this
-// user there will be issues with permissions on Docker mount points.
-//
-// This function IS NOT thread safe and should only be called in the main thread
-// when the application is booting.
-func EnsureKubectylUser() error {
-	sysName, err := getSystemName()
-	if err != nil {
-		return err
-	}
-
-	// Our way of detecting if kuber is running inside of Docker.
-	if sysName == "distroless" {
-		_config.System.Username = system.FirstNotEmpty(os.Getenv("KUBER_USERNAME"), "kubectyl")
-		_config.System.User.Uid = system.MustInt(system.FirstNotEmpty(os.Getenv("KUBER_UID"), "988"))
-		_config.System.User.Gid = system.MustInt(system.FirstNotEmpty(os.Getenv("KUBER_GID"), "988"))
-		return nil
-	}
-
-	if _config.System.User.Rootless.Enabled {
-		log.Info("rootless mode is enabled, skipping user creation...")
-		u, err := user.Current()
-		if err != nil {
-			return err
-		}
-		_config.System.Username = u.Username
-		_config.System.User.Uid = system.MustInt(u.Uid)
-		_config.System.User.Gid = system.MustInt(u.Gid)
-		return nil
-	}
-
-	log.WithField("username", _config.System.Username).Info("checking for kubectyl system user")
-	u, err := user.Lookup(_config.System.Username)
-	// If an error is returned but it isn't the unknown user error just abort
-	// the process entirely. If we did find a user, return it immediately.
-	if err != nil {
-		if _, ok := err.(user.UnknownUserError); !ok {
-			return err
-		}
-	} else {
-		_config.System.User.Uid = system.MustInt(u.Uid)
-		_config.System.User.Gid = system.MustInt(u.Gid)
-		return nil
-	}
-
-	command := fmt.Sprintf("useradd --system --no-create-home --shell /usr/sbin/nologin %s", _config.System.Username)
-	// Alpine Linux is the only OS we currently support that doesn't work with the useradd
-	// command, so in those cases we just modify the command a bit to work as expected.
-	if strings.HasPrefix(sysName, "alpine") {
-		command = fmt.Sprintf("adduser -S -D -H -G %[1]s -s /sbin/nologin %[1]s", _config.System.Username)
-		// We have to create the group first on Alpine, so do that here before continuing on
-		// to the user creation process.
-		if _, err := exec.Command("addgroup", "-S", _config.System.Username).Output(); err != nil {
-			return err
-		}
-	}
-
-	split := strings.Split(command, " ")
-	if _, err := exec.Command(split[0], split[1:]...).Output(); err != nil {
-		return err
-	}
-	u, err = user.Lookup(_config.System.Username)
-	if err != nil {
-		return err
-	}
-	_config.System.User.Uid = system.MustInt(u.Uid)
-	_config.System.User.Gid = system.MustInt(u.Gid)
-	return nil
-}
-
 // FromFile reads the configuration from the provided file and stores it in the
 // global singleton for this instance.
 func FromFile(path string) error {
@@ -550,11 +447,6 @@ func ConfigureDirectories() error {
 
 	log.WithField("path", _config.System.ArchiveDirectory).Debug("ensuring archive data directory exists")
 	if err := os.MkdirAll(_config.System.ArchiveDirectory, 0o700); err != nil {
-		return err
-	}
-
-	log.WithField("path", _config.System.BackupDirectory).Debug("ensuring backup data directory exists")
-	if err := os.MkdirAll(_config.System.BackupDirectory, 0o700); err != nil {
 		return err
 	}
 

@@ -26,7 +26,24 @@ import (
 
 // Returns information about the system that kuber is running on.
 func getSystemInformation(c *gin.Context) {
-	i, err := system.GetSystemInformation()
+	// i, err := system.GetSystemInformation(environment)
+	// if err != nil {
+	// 	middleware.CaptureAndAbort(c, err)
+	// 	return
+	// }
+
+	// if c.Query("v") == "2" {
+	// 	c.JSON(http.StatusOK, i)
+	// 	return
+	// }
+
+	cfg, clientset, err := environment.Cluster()
+	if err != nil {
+		middleware.CaptureAndAbort(c, err)
+		return
+	}
+
+	i, err := system.GetSystemInformation(clientset, config.Get().Cluster.Namespace)
 	if err != nil {
 		middleware.CaptureAndAbort(c, err)
 		return
@@ -37,23 +54,7 @@ func getSystemInformation(c *gin.Context) {
 		return
 	}
 
-	// cfg := config.Get().Cluster
-
-	config, _, err := environment.Cluster()
-	if err != nil {
-		middleware.CaptureAndAbort(c, err)
-		return
-	}
-
-	// config := &rest.Config{
-	// 	Host:        cfg.Host,
-	// 	BearerToken: cfg.BearerToken,
-	// 	TLSClientConfig: rest.TLSClientConfig{
-	// 		Insecure: cfg.Insecure,
-	// 	},
-	// }
-
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
 		middleware.CaptureAndAbort(c, err)
 		return
@@ -148,7 +149,10 @@ func postCreateServer(c *gin.Context) {
 				}
 			}
 		} else {
-			if err := i.Server().Environment.CreateSFTP(i.Server().Context()); err != nil {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			if err := i.Server().Environment.CreateSFTP(ctx, cancel); err != nil {
 				log.WithFields(log.Fields{"server_id": i.Server().ID(), "error": err}).Error("encountered error processing server SFTP process")
 			}
 			log.WithField("server_id", i.Server().ID()).Debug("skipping automatic start after successful server installation")

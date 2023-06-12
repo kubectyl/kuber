@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"net/http"
 	"os"
 
@@ -26,7 +27,6 @@ func postServerBackup(c *gin.Context) {
 	var data struct {
 		Adapter snapshot.AdapterType `json:"adapter"`
 		Uuid    string               `json:"uuid"`
-		Ignore  string               `json:"ignore"`
 	}
 	if err := c.BindJSON(&data); err != nil {
 		return
@@ -46,7 +46,7 @@ func postServerBackup(c *gin.Context) {
 		return
 	}
 
-	adapter := snapshot.NewLocal(snapshotClient, client, clientset, data.Uuid, data.Ignore)
+	adapter := snapshot.NewLocal(snapshotClient, client, clientset, data.Uuid)
 
 	// Attach the server ID and the request ID to the adapter log context for easier
 	// parsing in the logs.
@@ -64,12 +64,11 @@ func postServerBackup(c *gin.Context) {
 	c.Status(http.StatusAccepted)
 }
 
-// postServerRestoreBackup handles restoring a backup for a server by downloading
-// or finding the given backup on the system and then unpacking the archive into
-// the server's data directory. If the TruncateDirectory field is provided and
-// is true all of the files will be deleted for the server.
+// postServerRestoreBackup handles restoring a snapshot for a server by downloading
+// or finding the given snapshot on the system and then unpacking the archive into
+// the server's data directory.
 //
-// This endpoint will block until the backup is fully restored allowing for a
+// This endpoint will block until the snapshot is fully restored allowing for a
 // spinner to be displayed in the Panel UI effectively.
 //
 // TODO: stop the server if it is running
@@ -79,8 +78,7 @@ func postServerRestoreBackup(c *gin.Context) {
 	logger := middleware.ExtractLogger(c)
 
 	var data struct {
-		Adapter           snapshot.AdapterType `binding:"required,oneof=kuber s3" json:"adapter"`
-		TruncateDirectory bool                 `json:"truncate_directory"`
+		Adapter snapshot.AdapterType `binding:"required,oneof=kuber s3" json:"adapter"`
 		// A UUID is always required for this endpoint, however the download URL
 		// is only present when the given adapter type is s3.
 		DownloadUrl string `json:"download_url"`
@@ -99,14 +97,7 @@ func postServerRestoreBackup(c *gin.Context) {
 		s.SetRestoring(false)
 	}()
 
-	logger.Info("processing server backup restore request")
-	if data.TruncateDirectory {
-		logger.Info("received \"truncate_directory\" flag in request: deleting server files")
-		if err := s.Filesystem().TruncateRootDirectory(); err != nil {
-			middleware.CaptureAndAbort(c, err)
-			return
-		}
-	}
+	logger.Info("processing server snapshot restore request")
 
 	// Now that we've cleaned up the data directory if necessary, grab the snapshot file
 	// and attempt to restore it into the server directory.
@@ -139,6 +130,11 @@ func postServerRestoreBackup(c *gin.Context) {
 			s.Events().Publish(server.BackupRestoreCompletedEvent, "")
 			logger.Info("completed server restoration from local snapshot")
 			s.SetRestoring(false)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			s.Environment.CreateSFTP(ctx, cancel)
 		}(s, b, logger)
 		hasError = false
 		c.Status(http.StatusAccepted)

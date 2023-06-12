@@ -51,6 +51,8 @@ type ClusterConfiguration struct {
 	SnapshotClass string `json:"snapshot_class" yaml:"snapshot_class"`
 
 	ExternalTrafficPolicy string `json:"external_traffic_policy" default:"cluster" yaml:"external_traffic_policy"`
+
+	RestrictedPodSecurityStandard bool `default:"true" json:"restricted_standard" yaml:"restricted_standard"`
 }
 
 type ClusterNetworkConfiguration struct {

@@ -13,20 +13,19 @@ import (
 
 	errors2 "emperror.dev/errors"
 	"github.com/apex/log"
-	"github.com/docker/docker/api/types/mount"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
+	"k8s.io/utils/pointer"
 
 	"github.com/kubectyl/kuber/config"
 	"github.com/kubectyl/kuber/environment"
 	"github.com/kubectyl/kuber/system"
 
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -84,10 +83,11 @@ func (e *Environment) Attach(ctx context.Context) error {
 		// function is to avoid a hang situation when trying to attach to a container.
 		pollCtx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		defer func() {
-			e.SetState(environment.ProcessOfflineState)
-			e.SetStream(nil)
-		}()
+		// TODO: If metrics fail pod will be restarted / stopped.
+		// defer func() {
+		// 	e.SetState(environment.ProcessOfflineState)
+		// 	e.SetStream(nil)
+		// }()
 
 		go func() {
 			if err := e.pollResources(pollCtx); err != nil {
@@ -200,18 +200,6 @@ func (e *Environment) Create() error {
 
 	resources := e.Configuration.Limits()
 
-	dnsPolicies := map[string]corev1.DNSPolicy{
-		"clusterfirstwithhostnet": corev1.DNSClusterFirstWithHostNet,
-		"default":                 corev1.DNSDefault,
-		"none":                    corev1.DNSNone,
-		"clusterfirst":            corev1.DNSClusterFirst,
-	}
-
-	dnspolicy, ok := dnsPolicies[cfg.Cluster.DNSPolicy]
-	if !ok {
-		dnspolicy = corev1.DNSClusterFirst
-	}
-
 	imagePullPolicies := map[string]corev1.PullPolicy{
 		"always":       corev1.PullAlways,
 		"never":        corev1.PullNever,
@@ -247,10 +235,17 @@ func (e *Environment) Create() error {
 		},
 		Spec: corev1.PodSpec{
 			SecurityContext: &corev1.PodSecurityContext{
-				FSGroup:             &[]int64{2000}[0],
+				FSGroup:             pointer.Int64(2000),
 				FSGroupChangePolicy: &fsGroupChangePolicy,
+				RunAsUser:           pointer.Int64(1000),
+				RunAsNonRoot:        pointer.Bool(true),
 			},
-			DNSPolicy: dnspolicy,
+			DNSPolicy: map[string]corev1.DNSPolicy{
+				"clusterfirstwithhostnet": corev1.DNSClusterFirstWithHostNet,
+				"default":                 corev1.DNSDefault,
+				"none":                    corev1.DNSNone,
+				"clusterfirst":            corev1.DNSClusterFirst,
+			}[cfg.Cluster.DNSPolicy],
 			DNSConfig: &corev1.PodDNSConfig{Nameservers: config.Get().Cluster.Network.Dns},
 			Volumes: []corev1.Volume{
 				{
@@ -308,10 +303,6 @@ func (e *Environment) Create() error {
 							ContainerPort: port,
 							Protocol:      corev1.Protocol("UDP"),
 						},
-					},
-					SecurityContext: &corev1.SecurityContext{
-						AllowPrivilegeEscalation: &[]bool{false}[0],
-						RunAsUser:                &[]int64{int64(0)}[0],
 					},
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
@@ -373,6 +364,10 @@ func (e *Environment) Create() error {
 		},
 	}
 
+	volumeMounts, volumes := e.convertMounts()
+	pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, volumeMounts...)
+	pod.Spec.Volumes = append(pod.Spec.Volumes, volumes...)
+
 	// Disable CPU request / limit if is set to Unlimited
 	if resources.CpuLimit == 0 {
 		pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
@@ -428,12 +423,15 @@ func (e *Environment) Create() error {
 
 			// Add a new initContainer to the Pod
 			newInitContainer := corev1.Container{
-				// Name:      "replace-" + strings.ToLower(strings.ReplaceAll(k.FileName, ".", "-")),
 				Name:            "configuration-files",
 				Image:           "busybox",
 				ImagePullPolicy: corev1.PullIfNotPresent,
-				Command:         command,
-				Resources:       corev1.ResourceRequirements{},
+				SecurityContext: &corev1.SecurityContext{
+					RunAsUser:    pointer.Int64(1000),
+					RunAsNonRoot: pointer.Bool(true),
+				},
+				Command:   command,
+				Resources: corev1.ResourceRequirements{},
 				VolumeMounts: []corev1.VolumeMount{
 					{
 						Name:      "replacement",
@@ -524,12 +522,11 @@ func (e *Environment) Create() error {
 		}
 	}
 
-	// Set the user running the container properly depending on what mode we are operating in.
-	securityContext := pod.Spec.Containers[0].SecurityContext
-	if cfg.System.User.Rootless.Enabled {
-		securityContext.RunAsNonRoot = &[]bool{true}[0]
-		securityContext.RunAsUser = &[]int64{int64(cfg.System.User.Rootless.ContainerUID)}[0]
-		securityContext.RunAsGroup = &[]int64{int64(cfg.System.User.Rootless.ContainerGID)}[0]
+	// Configure pod spec for restricted security standard
+	if cfg.Cluster.RestrictedPodSecurityStandard {
+		if err := e.ConfigurePodSpecForRestrictedStandard(&pod.Spec); err != nil {
+			return err
+		}
 	}
 
 	// Check if the services exists before we create the actual pod.
@@ -729,31 +726,8 @@ func (e *Environment) CreateService() error {
 	return nil
 }
 
-func (e *Environment) CreateSFTP(ctx context.Context) error {
+func (e *Environment) CreateSFTP(ctx context.Context, cancelFunc context.CancelFunc) error {
 	cfg := config.Get()
-
-	dnsPolicies := map[string]corev1.DNSPolicy{
-		"clusterfirstwithhostnet": corev1.DNSClusterFirstWithHostNet,
-		"default":                 corev1.DNSDefault,
-		"none":                    corev1.DNSNone,
-		"clusterfirst":            corev1.DNSClusterFirst,
-	}
-
-	dnspolicy, ok := dnsPolicies[cfg.Cluster.DNSPolicy]
-	if !ok {
-		dnspolicy = corev1.DNSClusterFirst
-	}
-
-	imagePullPolicies := map[string]corev1.PullPolicy{
-		"always":       corev1.PullAlways,
-		"never":        corev1.PullNever,
-		"ifnotpresent": corev1.PullIfNotPresent,
-	}
-
-	imagepullpolicy, ok := imagePullPolicies[cfg.Cluster.ImagePullPolicy]
-	if !ok {
-		imagepullpolicy = corev1.PullIfNotPresent
-	}
 
 	fsGroupChangePolicy := corev1.FSGroupChangeOnRootMismatch
 
@@ -773,10 +747,17 @@ func (e *Environment) CreateSFTP(ctx context.Context) error {
 		},
 		Spec: corev1.PodSpec{
 			SecurityContext: &corev1.PodSecurityContext{
-				FSGroup:             &[]int64{2000}[0],
+				FSGroup:             pointer.Int64(2000),
 				FSGroupChangePolicy: &fsGroupChangePolicy,
+				RunAsUser:           pointer.Int64(1000),
+				RunAsNonRoot:        pointer.Bool(true),
 			},
-			DNSPolicy: dnspolicy,
+			DNSPolicy: map[string]corev1.DNSPolicy{
+				"clusterfirstwithhostnet": corev1.DNSClusterFirstWithHostNet,
+				"default":                 corev1.DNSDefault,
+				"none":                    corev1.DNSNone,
+				"clusterfirst":            corev1.DNSClusterFirst,
+			}[cfg.Cluster.DNSPolicy],
 			DNSConfig: &corev1.PodDNSConfig{Nameservers: config.Get().Cluster.Network.Dns},
 			Volumes: []corev1.Volume{
 				{
@@ -805,12 +786,22 @@ func (e *Environment) CreateSFTP(ctx context.Context) error {
 						},
 					},
 				},
+				{
+					Name: "logs",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
 			},
 			Containers: []corev1.Container{
 				{
-					Name:            "sftp-server",
-					Image:           cfg.System.Sftp.SftpImage,
-					ImagePullPolicy: imagepullpolicy,
+					Name:  "sftp-server",
+					Image: cfg.System.Sftp.SftpImage,
+					ImagePullPolicy: map[string]corev1.PullPolicy{
+						"always":       corev1.PullAlways,
+						"never":        corev1.PullNever,
+						"ifnotpresent": corev1.PullIfNotPresent,
+					}[cfg.Cluster.ImagePullPolicy],
 					Env: []corev1.EnvVar{
 						{
 							Name:  "P_SERVER_UUID",
@@ -837,11 +828,22 @@ func (e *Environment) CreateSFTP(ctx context.Context) error {
 							ReadOnly:  true,
 							MountPath: path.Join(cfg.System.Data, ".sftp"),
 						},
+						{
+							Name:      "logs",
+							MountPath: cfg.System.LogDirectory,
+						},
 					},
 				},
 			},
 			RestartPolicy: corev1.RestartPolicyAlways,
 		},
+	}
+
+	// Configure pod spec for restricted security standard
+	if cfg.Cluster.RestrictedPodSecurityStandard {
+		if err := e.ConfigurePodSpecForRestrictedStandard(&pod.Spec); err != nil {
+			return err
+		}
 	}
 
 	if len(e.Configuration.NodeSelectors()) > 0 {
@@ -866,15 +868,17 @@ func (e *Environment) CreateSFTP(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			if pod.Status.Phase != v1.PodRunning {
-				var zero int64 = 0
+			if pod.Status.Phase != corev1.PodRunning {
 				policy := metav1.DeletePropagationForeground
 
-				if err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ctx, e.Id, metav1.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: &policy}); err != nil {
+				if err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ctx, e.Id, metav1.DeleteOptions{
+					GracePeriodSeconds: pointer.Int64(0),
+					PropagationPolicy:  &policy,
+				}); err != nil {
 					return err
 				}
 
-				return e.CreateSFTP(ctx)
+				return e.CreateSFTP(ctx, cancelFunc)
 			}
 		} else {
 			e.log().WithField("error", err).Warn("environment/kubernetes: failed to create SFTP pod")
@@ -888,11 +892,11 @@ func (e *Environment) CreateSFTP(ctx context.Context) error {
 		}
 
 		switch pod.Status.Phase {
-		case v1.PodPending:
+		case corev1.PodPending:
 			return false, nil
-		case v1.PodRunning:
+		case corev1.PodRunning:
 			return true, nil
-		case v1.PodFailed, v1.PodSucceeded:
+		case corev1.PodFailed, corev1.PodSucceeded:
 			return false, fmt.Errorf("pod ran to completion")
 		default:
 			return false, fmt.Errorf("unknown pod status")
@@ -918,7 +922,6 @@ func (e *Environment) Destroy() error {
 	// We set it to stopping than offline to prevent crash detection from being triggered.
 	e.SetState(environment.ProcessStoppingState)
 
-	var zero int64 = 0
 	policy := metav1.DeletePropagationForeground
 
 	// Loop through services with service Kubectyl and server UUID and delete them
@@ -929,7 +932,10 @@ func (e *Environment) Destroy() error {
 		return err
 	} else {
 		for _, s := range services.Items {
-			err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).Delete(ctx, s.Name, metav1.DeleteOptions{})
+			err := e.client.CoreV1().Services(config.Get().Cluster.Namespace).Delete(ctx, s.Name, metav1.DeleteOptions{
+				GracePeriodSeconds: pointer.Int64(30),
+				PropagationPolicy:  &policy,
+			})
 			if err != nil {
 				return err
 			}
@@ -938,7 +944,7 @@ func (e *Environment) Destroy() error {
 
 	// Delete configmaps
 	err = e.client.CoreV1().ConfigMaps(config.Get().Cluster.Namespace).DeleteCollection(ctx, metav1.DeleteOptions{
-		GracePeriodSeconds: &zero,
+		GracePeriodSeconds: pointer.Int64(30),
 		PropagationPolicy:  &policy,
 	}, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("Service=Kubectyl,uuid=%s", e.Id),
@@ -949,7 +955,7 @@ func (e *Environment) Destroy() error {
 
 	// Delete pods
 	err = e.client.CoreV1().Pods(config.Get().Cluster.Namespace).DeleteCollection(ctx, metav1.DeleteOptions{
-		GracePeriodSeconds: &zero,
+		GracePeriodSeconds: pointer.Int64(30),
 		PropagationPolicy:  &policy,
 	}, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("Service=Kubectyl,uuid=%s", e.Id),
@@ -960,7 +966,7 @@ func (e *Environment) Destroy() error {
 
 	// Delete pvc
 	err = e.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Delete(ctx, e.Id+"-pvc", metav1.DeleteOptions{
-		GracePeriodSeconds: &zero,
+		GracePeriodSeconds: pointer.Int64(30),
 		PropagationPolicy:  &policy,
 	})
 	if err != nil && !errors.IsNotFound(err) {
@@ -1013,10 +1019,10 @@ func (e *Environment) SendCommand(c string) error {
 // Readlog reads the log file for the server. This does not care if the server
 // is running or not, it will simply try to read the last X bytes of the file
 // and return them.
-func (e *Environment) Readlog(lines int) ([]string, error) {
+func (e *Environment) Readlog(lines int64) ([]string, error) {
 	r := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).GetLogs(e.Id, &corev1.PodLogOptions{
 		Container: "process",
-		TailLines: &[]int64{int64(lines)}[0],
+		TailLines: pointer.Int64(lines),
 	})
 	podLogs, err := r.Stream(context.Background())
 	if err != nil {
@@ -1033,17 +1039,26 @@ func (e *Environment) Readlog(lines int) ([]string, error) {
 	return out, nil
 }
 
-func (e *Environment) convertMounts() []mount.Mount {
-	var out []mount.Mount
+func (e *Environment) convertMounts() ([]corev1.VolumeMount, []corev1.Volume) {
+	var out []corev1.VolumeMount
+	var volumes []corev1.Volume
 
-	for _, m := range e.Configuration.Mounts() {
-		out = append(out, mount.Mount{
-			Type:     mount.TypeBind,
-			Source:   m.Source,
-			Target:   m.Target,
-			ReadOnly: m.ReadOnly,
+	for i, m := range e.Configuration.Mounts() {
+		out = append(out, corev1.VolumeMount{
+			Name:      fmt.Sprintf("volume-%d", i),
+			MountPath: m.Target,
+			ReadOnly:  m.ReadOnly,
+		})
+
+		volumes = append(volumes, corev1.Volume{
+			Name: fmt.Sprintf("volume-%d", i),
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: m.Source,
+				},
+			},
 		})
 	}
 
-	return out
+	return out, volumes
 }

@@ -23,8 +23,8 @@ import (
 	"github.com/ulikunitz/xz"
 )
 
-func (fs *Filesystem) createArchive(connection *SFTPConn, cleaned []string, archivePath string) error {
-	archiveFile, err := connection.sftpClient.Create(archivePath)
+func (fs *Filesystem) createArchive(cleaned []string, archivePath string) error {
+	archiveFile, err := fs.manager.Create(archivePath)
 	if err != nil {
 		return fmt.Errorf("failed to create archive file: %v", err)
 	}
@@ -39,21 +39,21 @@ func (fs *Filesystem) createArchive(connection *SFTPConn, cleaned []string, arch
 	defer tarWriter.Close()
 
 	for _, remoteFile := range cleaned {
-		fileInfo, err := connection.sftpClient.Stat(remoteFile)
+		fileInfo, err := fs.manager.Stat(remoteFile)
 		if err != nil {
 			log.Printf("Failed to retrieve file info for %q: %v", remoteFile, err)
 			continue
 		}
 
 		if fileInfo.IsDir() {
-			err = fs.addDirectoryToArchive(connection.sftpClient, remoteFile, tarWriter)
+			err = fs.addDirectoryToArchive(remoteFile, tarWriter)
 			if err != nil {
 				log.Printf("Failed to add directory %q to archive: %v", remoteFile, err)
 			}
 			continue
 		}
 
-		remoteReader, err := connection.sftpClient.Open(remoteFile)
+		remoteReader, err := fs.manager.Open(remoteFile)
 		if err != nil {
 			log.Printf("Failed to open remote file %q: %v", remoteFile, err)
 			continue
@@ -79,8 +79,8 @@ func (fs *Filesystem) createArchive(connection *SFTPConn, cleaned []string, arch
 	return nil
 }
 
-func (fs *Filesystem) addDirectoryToArchive(sftpClient *sftp.Client, remoteDir string, archiveWriter *tar.Writer) error {
-	entries, err := sftpClient.ReadDir(remoteDir)
+func (fs *Filesystem) addDirectoryToArchive(remoteDir string, archiveWriter *tar.Writer) error {
+	entries, err := fs.manager.ReadDir(remoteDir)
 	if err != nil {
 		return fmt.Errorf("failed to read directory %q: %v", remoteDir, err)
 	}
@@ -89,14 +89,14 @@ func (fs *Filesystem) addDirectoryToArchive(sftpClient *sftp.Client, remoteDir s
 		remotePath := filepath.Join(remoteDir, entry.Name())
 
 		if entry.IsDir() {
-			err = fs.addDirectoryToArchive(sftpClient, remotePath, archiveWriter)
+			err = fs.addDirectoryToArchive(remotePath, archiveWriter)
 			if err != nil {
 				return err
 			}
 			continue
 		}
 
-		remoteReader, err := sftpClient.Open(remotePath)
+		remoteReader, err := fs.manager.Open(remotePath)
 		if err != nil {
 			log.Printf("Failed to open remote file %q: %v", remotePath, err)
 			continue
@@ -147,17 +147,12 @@ func (fs *Filesystem) CompressFiles(dir string, paths []string) (os.FileInfo, er
 		return nil, err
 	}
 
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		return nil, err
-	}
-
 	d := path.Join(
 		cleanedRootDir,
 		fmt.Sprintf("archive-%s.tar.gz", strings.ReplaceAll(time.Now().Format(time.RFC3339), ":", "")),
 	)
 
-	if err := fs.createArchive(connection, cleaned, d); err != nil {
+	if err := fs.createArchive(cleaned, d); err != nil {
 		return nil, err
 	}
 
@@ -187,13 +182,8 @@ func (fs *Filesystem) SpaceAvailableForDecompression(ctx context.Context, dir st
 	// waiting an unnecessary amount of time on this call.
 	dirSize, _ := fs.DiskUsage(false)
 
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		return err
-	}
-
 	var size int64
-	err = walkDirSFTP(connection.sftpClient, ".", func(path string, fileInfo os.FileInfo, err error) error {
+	err := fs.walkDirSFTP(".", func(path string, fileInfo os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -224,8 +214,8 @@ func (fs *Filesystem) SpaceAvailableForDecompression(ctx context.Context, dir st
 
 type SFTPWalkerFunc func(path string, fileInfo os.FileInfo, err error) error
 
-func walkDirSFTP(client *sftp.Client, dirPath string, fn SFTPWalkerFunc) error {
-	entries, err := client.ReadDir(dirPath)
+func (fs *Filesystem) walkDirSFTP(dirPath string, fn SFTPWalkerFunc) error {
+	entries, err := fs.manager.ReadDir(dirPath)
 	if err != nil {
 		return err
 	}
@@ -234,7 +224,7 @@ func walkDirSFTP(client *sftp.Client, dirPath string, fn SFTPWalkerFunc) error {
 		subPath := filepath.Join(dirPath, entry.Name())
 
 		if entry.IsDir() {
-			err := walkDirSFTP(client, subPath, fn)
+			err := fs.walkDirSFTP(subPath, fn)
 			if err != nil {
 				if err := fn(subPath, entry, err); err != nil && err != filepath.SkipDir {
 					return err
@@ -273,12 +263,7 @@ func (fs *Filesystem) DecompressFileUnsafe(ctx context.Context, dir string, file
 		return errors.WithStack(err)
 	}
 
-	connection, err := fs.manager.GetConnection()
-	if err != nil {
-		return err
-	}
-
-	f, err := connection.sftpClient.Open(file)
+	f, err := fs.manager.Open(file)
 	if err != nil {
 		return err
 	}
@@ -298,25 +283,25 @@ func (fs *Filesystem) DecompressFileUnsafe(ctx context.Context, dir string, file
 
 	switch mime.String() {
 	case "application/vnd.rar", "application/x-rar-compressed":
-		return extractRARArchive(connection.sftpClient, file, dir)
+		return fs.extractRARArchive(file, dir)
 	case "application/x-tar", "application/x-br", "application/x-lzip", "application/x-sz", "application/zstd":
-		return extractTARArchive(connection.sftpClient, file, dir)
+		return fs.extractTARArchive(file, dir)
 	case "application/x-xz":
-		return extractTARXZArchive(connection.sftpClient, file, dir)
+		return fs.extractTARXZArchive(file, dir)
 	case "application/x-bzip2":
-		return extractBZIP2Archive(connection.sftpClient, file, dir)
+		return fs.extractBZIP2Archive(file, dir)
 	case "application/gzip", "application/x-gzip":
-		return extractGZArchive(connection.sftpClient, file, dir)
+		return fs.extractGZArchive(file, dir)
 	case "application/zip":
-		return extractZIPArchive(connection.sftpClient, file, dir)
+		return fs.extractZIPArchive(file, dir)
 	default:
 		return fmt.Errorf("unsupported archive format: %s", mime.String())
 	}
 }
 
 // Extract RAR archive file from the remote SFTP server.
-func extractRARArchive(sftpClient *sftp.Client, remoteFilePath string, destinationDir string) error {
-	remoteFile, err := sftpClient.Open(remoteFilePath)
+func (fs *Filesystem) extractRARArchive(remoteFilePath string, destinationDir string) error {
+	remoteFile, err := fs.manager.Open(remoteFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to open remote file: %v", err)
 	}
@@ -338,7 +323,7 @@ func extractRARArchive(sftpClient *sftp.Client, remoteFilePath string, destinati
 
 		if header.IsDir {
 			destDir := filepath.Join(destinationDir, header.Name)
-			err := sftpClient.MkdirAll(destDir)
+			err := fs.manager.MkdirAll(destDir)
 			if err != nil {
 				return fmt.Errorf("failed to create directory: %v", err)
 			}
@@ -346,7 +331,7 @@ func extractRARArchive(sftpClient *sftp.Client, remoteFilePath string, destinati
 		}
 
 		destFilePath := filepath.Join(destinationDir, header.Name)
-		destFile, err := sftpClient.Create(destFilePath)
+		destFile, err := fs.manager.Create(destFilePath)
 		if err != nil {
 			return fmt.Errorf("failed to create file: %v", err)
 		}
@@ -362,8 +347,8 @@ func extractRARArchive(sftpClient *sftp.Client, remoteFilePath string, destinati
 }
 
 // Extract TAR archive file from the remote SFTP server.
-func extractTARArchive(sftpClient *sftp.Client, remoteFilePath string, destinationDir string) error {
-	remoteFile, err := sftpClient.Open(remoteFilePath)
+func (fs *Filesystem) extractTARArchive(remoteFilePath string, destinationDir string) error {
+	remoteFile, err := fs.manager.Open(remoteFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to open remote file: %v", err)
 	}
@@ -384,12 +369,12 @@ func extractTARArchive(sftpClient *sftp.Client, remoteFilePath string, destinati
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			err := sftpClient.MkdirAll(destFilePath)
+			err := fs.manager.MkdirAll(destFilePath)
 			if err != nil {
 				return fmt.Errorf("failed to create directory: %v", err)
 			}
 		case tar.TypeReg:
-			destFile, err := sftpClient.Create(destFilePath)
+			destFile, err := fs.manager.Create(destFilePath)
 			if err != nil {
 				return fmt.Errorf("failed to create file: %v", err)
 			}
@@ -408,8 +393,8 @@ func extractTARArchive(sftpClient *sftp.Client, remoteFilePath string, destinati
 }
 
 // Extract GZ archive file from the remote SFTP server.
-func extractGZArchive(sftpClient *sftp.Client, remoteFilePath string, destinationDir string) error {
-	remoteFile, err := sftpClient.Open(remoteFilePath)
+func (fs *Filesystem) extractGZArchive(remoteFilePath string, destinationDir string) error {
+	remoteFile, err := fs.manager.Open(remoteFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to open remote file: %v", err)
 	}
@@ -436,12 +421,12 @@ func extractGZArchive(sftpClient *sftp.Client, remoteFilePath string, destinatio
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			err := sftpClient.MkdirAll(destFilePath)
+			err := fs.manager.MkdirAll(destFilePath)
 			if err != nil {
 				return fmt.Errorf("failed to create directory: %v", err)
 			}
 		case tar.TypeReg:
-			destFile, err := sftpClient.Create(destFilePath)
+			destFile, err := fs.manager.Create(destFilePath)
 			if err != nil {
 				return fmt.Errorf("failed to create file: %v", err)
 			}
@@ -460,8 +445,8 @@ func extractGZArchive(sftpClient *sftp.Client, remoteFilePath string, destinatio
 }
 
 // Extract TAR.XZ archive file from the remote SFTP server.
-func extractTARXZArchive(sftpClient *sftp.Client, remoteFilePath string, destinationDir string) error {
-	remoteFile, err := sftpClient.Open(remoteFilePath)
+func (fs *Filesystem) extractTARXZArchive(remoteFilePath string, destinationDir string) error {
+	remoteFile, err := fs.manager.Open(remoteFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to open remote file: %v", err)
 	}
@@ -487,12 +472,12 @@ func extractTARXZArchive(sftpClient *sftp.Client, remoteFilePath string, destina
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			err := sftpClient.MkdirAll(destFilePath)
+			err := fs.manager.MkdirAll(destFilePath)
 			if err != nil {
 				return fmt.Errorf("failed to create directory: %v", err)
 			}
 		case tar.TypeReg:
-			destFile, err := sftpClient.Create(destFilePath)
+			destFile, err := fs.manager.Create(destFilePath)
 			if err != nil {
 				return fmt.Errorf("failed to create file: %v", err)
 			}
@@ -511,8 +496,8 @@ func extractTARXZArchive(sftpClient *sftp.Client, remoteFilePath string, destina
 }
 
 // Extract BZIP2 archive file from the remote SFTP server.
-func extractBZIP2Archive(sftpClient *sftp.Client, remoteFilePath string, destinationDir string) error {
-	remoteFile, err := sftpClient.Open(remoteFilePath)
+func (fs *Filesystem) extractBZIP2Archive(remoteFilePath string, destinationDir string) error {
+	remoteFile, err := fs.manager.Open(remoteFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to open remote file: %v", err)
 	}
@@ -534,12 +519,12 @@ func extractBZIP2Archive(sftpClient *sftp.Client, remoteFilePath string, destina
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			err := sftpClient.MkdirAll(destFilePath)
+			err := fs.manager.MkdirAll(destFilePath)
 			if err != nil {
 				return fmt.Errorf("failed to create directory: %v", err)
 			}
 		case tar.TypeReg:
-			destFile, err := sftpClient.Create(destFilePath)
+			destFile, err := fs.manager.Create(destFilePath)
 			if err != nil {
 				return fmt.Errorf("failed to create file: %v", err)
 			}
@@ -558,14 +543,14 @@ func extractBZIP2Archive(sftpClient *sftp.Client, remoteFilePath string, destina
 }
 
 // Extract ZIP archive file from the remote SFTP server.
-func extractZIPArchive(sftpClient *sftp.Client, remoteFilePath string, destinationDir string) error {
-	remoteFile, err := sftpClient.Open(remoteFilePath)
+func (fs *Filesystem) extractZIPArchive(remoteFilePath string, destinationDir string) error {
+	remoteFile, err := fs.manager.Open(remoteFilePath)
 	if err != nil {
 		return fmt.Errorf("failed to open remote file: %v", err)
 	}
 	defer remoteFile.Close()
 
-	remoteFileInfo, err := sftpClient.Stat(remoteFilePath)
+	remoteFileInfo, err := fs.manager.Stat(remoteFilePath)
 	if err != nil {
 		return err
 	}
@@ -579,20 +564,20 @@ func extractZIPArchive(sftpClient *sftp.Client, remoteFilePath string, destinati
 		destFilePath := filepath.Join(destinationDir, file.Name)
 
 		if file.FileInfo().IsDir() {
-			err := sftpClient.MkdirAll(destFilePath)
+			err := fs.manager.MkdirAll(destFilePath)
 			if err != nil {
 				return fmt.Errorf("failed to create directory: %v", err)
 			}
 			continue
 		}
 
-		destFile, err := sftpClient.Create(destFilePath)
+		destFile, err := fs.manager.Create(destFilePath)
 		if err != nil {
 			return fmt.Errorf("failed to create file: %v", err)
 		}
 		defer destFile.Close()
 
-		srcFile, err := sftpClient.Open(file.Name)
+		srcFile, err := fs.manager.Open(file.Name)
 		if err != nil {
 			return fmt.Errorf("failed to open file inside ZIP: %v", err)
 		}
