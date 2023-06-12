@@ -83,10 +83,11 @@ func (e *Environment) Attach(ctx context.Context) error {
 		// function is to avoid a hang situation when trying to attach to a container.
 		pollCtx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		defer func() {
-			e.SetState(environment.ProcessOfflineState)
-			e.SetStream(nil)
-		}()
+		// TODO: If metrics fail pod will be restarted / stopped.
+		// defer func() {
+		// 	e.SetState(environment.ProcessOfflineState)
+		// 	e.SetStream(nil)
+		// }()
 
 		go func() {
 			if err := e.pollResources(pollCtx); err != nil {
