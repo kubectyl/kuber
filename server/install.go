@@ -536,6 +536,7 @@ func (ip *InstallationProcess) Execute() (string, error) {
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsUser:    pointer.Int64(1000),
 				RunAsNonRoot: pointer.Bool(true),
+				FsGroup:      pointer.Int64(1000),
 			},
 			Containers: []corev1.Container{
 				{
