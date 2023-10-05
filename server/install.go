@@ -498,6 +498,9 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		return "", err
 	}
 
+	// Prevents high CPU usage of kubelet by preventing chown on the entire CSI
+	fsGroupChangePolicy := corev1.FSGroupChangeOnRootMismatch
+	
 	pod := &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",
@@ -536,7 +539,8 @@ func (ip *InstallationProcess) Execute() (string, error) {
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsUser:    pointer.Int64(1000),
 				RunAsNonRoot: pointer.Bool(true),
-				FsGroup:      pointer.Int64(1000),
+				FsGroup:      pointer.Int64(2000),
+				FSGroupChangePolicy: &fsGroupChangePolicy,
 			},
 			Containers: []corev1.Container{
 				{
