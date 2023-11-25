@@ -248,10 +248,7 @@ func rootCmdRun(cmd *cobra.Command, _ []string) {
 
 				// we use goroutine to avoid blocking whole process
 				go func() {
-					ctx, cancel := context.WithCancel(context.Background())
-					defer cancel()
-
-					if err := s.Environment.CreateSFTP(ctx, cancel); err != nil {
+					if err := s.Environment.CreateSFTP(ctx); err != nil {
 						log.WithField("error", err).Warn("failed to create server SFTP pod")
 					}
 				}()

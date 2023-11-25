@@ -1,7 +1,6 @@
 package router
 
 import (
-	"context"
 	"net/http"
 	"os"
 
@@ -131,10 +130,7 @@ func postServerRestoreBackup(c *gin.Context) {
 			logger.Info("completed server restoration from local snapshot")
 			s.SetRestoring(false)
 
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			s.Environment.CreateSFTP(ctx, cancel)
+			s.Environment.CreateSFTP(s.Context())
 		}(s, b, logger)
 		hasError = false
 		c.Status(http.StatusAccepted)

@@ -299,10 +299,7 @@ func (s *Server) OnStateChange() {
 				if IsTooFrequentCrashError(err) {
 					server.Log().Info("did not restart server after crash; occurred too soon after the last")
 
-					ctx, cancel := context.WithCancel(context.Background())
-					defer cancel()
-
-					if err := s.Environment.CreateSFTP(ctx, cancel); err != nil {
+					if err := s.Environment.CreateSFTP(s.Context()); err != nil {
 						server.Log().WithField("error", err).Error("failed to start server SFTP")
 					}
 				} else {

@@ -91,11 +91,6 @@ func GetSystemInformation(clientset *kubernetes.Clientset, namespace string) (*I
 }
 
 func getKubernetesInfo(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (*KubernetesInfo, error) {
-	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("error getting nodes: %v", err)
-	}
-
 	// TODO: Change method to get namespace string
 	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -108,7 +103,6 @@ func getKubernetesInfo(ctx context.Context, clientset *kubernetes.Clientset, nam
 	}
 
 	kubeInfo := &KubernetesInfo{
-		Nodes:     getNodeInfo(nodes),
 		PodStatus: getPodStatuses(pods),
 		Version: version.Info{
 			Major:        info.Major,
@@ -124,20 +118,6 @@ func getKubernetesInfo(ctx context.Context, clientset *kubernetes.Clientset, nam
 	}
 
 	return kubeInfo, nil
-}
-
-func getNodeInfo(nodes *corev1.NodeList) []NodeInfo {
-	nodeInfoList := make([]NodeInfo, 0)
-	for _, node := range nodes.Items {
-		podsNum, _ := node.Status.Capacity.Pods().AsInt64()
-
-		nodeInfo := NodeInfo{
-			Name:    node.Name,
-			PodsNum: podsNum,
-		}
-		nodeInfoList = append(nodeInfoList, nodeInfo)
-	}
-	return nodeInfoList
 }
 
 func getPodStatuses(pods *corev1.PodList) map[string]string {

@@ -40,7 +40,7 @@ type BackupInterface interface {
 	WithLogContext(map[string]interface{})
 	// Generate creates a backup in whatever the configured source for the
 	// specific implementation is.
-	Generate(context.Context, string, string) (*ArchiveDetails, error)
+	Generate(context.Context, string) (*ArchiveDetails, error)
 	// Remove removes a backup file.
 	Remove() error
 	// Restore is called when a backup is ready to be restored to the disk from

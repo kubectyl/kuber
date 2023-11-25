@@ -93,7 +93,7 @@ type ProcessEnvironment interface {
 	ExitState() (uint32, bool, error)
 
 	// Creates the pod for SFTP server.
-	CreateSFTP(ctx context.Context, cancelFunc context.CancelFunc) error
+	CreateSFTP(ctx context.Context) error
 
 	// Creates the necessary environment for running the server process. For example,
 	// in the Docker environment create will create a new container instance for the

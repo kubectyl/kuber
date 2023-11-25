@@ -8,7 +8,6 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
-	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -26,60 +25,14 @@ import (
 )
 
 func Cluster() (c *rest.Config, clientset *kubernetes.Clientset, err error) {
-	cfg := config.Get().Cluster
-
-	c = &rest.Config{
-		Host:        cfg.Host,
-		BearerToken: cfg.BearerToken,
-		TLSClientConfig: rest.TLSClientConfig{
-			Insecure: cfg.Insecure,
-		},
-	}
-
-	var caData []byte
-	if cfg.KeyFile != "" && !cfg.Insecure {
-		caData, err = os.ReadFile(cfg.CAFile)
-		if err != nil {
-			fmt.Printf("Error reading certificate authority data: %v\n", err)
-			return
-		}
-
-		c.TLSClientConfig.CAData = caData
-	}
-
-	var certData []byte
-	if cfg.KeyFile != "" && !cfg.Insecure {
-		certData, err = os.ReadFile(cfg.CertFile)
-		if err != nil {
-			fmt.Printf("Error reading client certificate data: %v\n", err)
-			return
-		}
-
-		c.TLSClientConfig.CertData = certData
-	}
-
-	var keyData []byte
-	if cfg.KeyFile != "" && !cfg.Insecure {
-		keyData, err = os.ReadFile(cfg.KeyFile)
-		if err != nil {
-			fmt.Printf("Error reading client key data: %v\n", err)
-			return
-		}
-
-		c.TLSClientConfig.KeyData = keyData
-	}
-
-	// Automatic setup of the Kubernetes client's connection ensuring secure communication.
-	if sa := os.Getenv("KUBECONFIG_IN_CLUSTER"); sa == "true" {
-		c, err = rest.InClusterConfig()
-		if err != nil {
-			panic(err)
-		}
+	c, err = rest.InClusterConfig()
+	if err != nil {
+		panic(err.Error())
 	}
 
 	client, err := kubernetes.NewForConfig(c)
 	if err != nil {
-		panic(err)
+		panic(err.Error())
 	}
 	return c, client, err
 }

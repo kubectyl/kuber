@@ -149,10 +149,7 @@ func postCreateServer(c *gin.Context) {
 				}
 			}
 		} else {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			if err := i.Server().Environment.CreateSFTP(ctx, cancel); err != nil {
+			if err := i.Server().Environment.CreateSFTP(i.Server().Context()); err != nil {
 				log.WithFields(log.Fields{"server_id": i.Server().ID(), "error": err}).Error("encountered error processing server SFTP process")
 			}
 			log.WithField("server_id", i.Server().ID()).Debug("skipping automatic start after successful server installation")

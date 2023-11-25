@@ -58,7 +58,7 @@ func (s *Server) getServerwideIgnoredFiles() (string, error) {
 // websocket. We let the actual snapshot system handle notifying the panel of the
 // status, but that won't emit a websocket event.
 func (s *Server) Snapshot(b snapshot.BackupInterface) error {
-	ad, err := b.Generate(s.Context(), s.ID(), "")
+	ad, err := b.Generate(s.Context(), s.ID())
 	if err != nil {
 		if err := s.notifyPanelOfSnapshot(b.Identifier(), &snapshot.ArchiveDetails{}, false); err != nil {
 			s.Log().WithFields(log.Fields{

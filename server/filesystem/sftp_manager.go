@@ -1,16 +1,12 @@
 package filesystem
 
 import (
+	"bytes"
 	"fmt"
-	"io/fs"
-
-	"github.com/apex/log"
-
+	"log"
 	"sync"
 	"sync/atomic"
-	"time"
 
-	"emperror.dev/errors"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
@@ -55,8 +51,8 @@ func (s *SFTPConn) GetClient() *sftp.Client {
 func (s *SFTPConn) Close() error {
 	s.Lock()
 	defer s.Unlock()
-	if s.closed {
-		return fmt.Errorf("connection was already closed")
+	if s.closed == true {
+		return fmt.Errorf("Connection was already closed")
 	}
 
 	s.shutdown <- true
@@ -69,18 +65,19 @@ func (s *SFTPConn) Close() error {
 // for SFTPConn returned by NewClient
 type BasicSFTPManager struct {
 	conns      []*SFTPConn
-	log        *log.Entry
+	log        *log.Logger
 	connString string
 	sshConfig  *ssh.ClientConfig
 }
 
 // NewBasicSFTPManager returns a BasicSFTPManager
 func NewBasicSFTPManager(connString string, config *ssh.ClientConfig) *BasicSFTPManager {
+	var buf bytes.Buffer
 	manager := &BasicSFTPManager{
 		conns:      make([]*SFTPConn, 0),
 		connString: connString,
 		sshConfig:  config,
-		log:        log.WithFields(log.Fields{"sftp_manager": connString, "timeout": config.Timeout}),
+		log:        log.New(&buf, "logger: ", log.Lshortfile),
 	}
 	return manager
 }
@@ -95,12 +92,12 @@ func (m *BasicSFTPManager) handleReconnects(c *SFTPConn) {
 	case <-c.shutdown:
 		c.sshConn.Close()
 		break
-	// case res := <-closed:
+		// case res := <-closed:
 	case <-closed:
-		// m.log.WithField("error", res).Error("connection closed, reconnecting...")
+		// fmt.Println("Connection closed, reconnecting: ", res)
 		conn, err := ssh.Dial("tcp", m.connString, m.sshConfig)
 		if err != nil {
-			// m.log.WithField("error", err).Error("failed to reconnect.")
+			// fmt.Println("Failed to reconnect:" + err.Error())
 			m.Close()
 			return
 		}
@@ -160,175 +157,4 @@ func (m *BasicSFTPManager) Close() error {
 	}
 	m.conns = nil
 	return nil
-}
-
-func (m *BasicSFTPManager) withConnectionCheck(fn func(*sftp.Client) (interface{}, error)) (interface{}, error) {
-	connection, err := m.GetConnection()
-	if err != nil {
-		return nil, err
-	}
-	if connection == nil || connection.sftpClient == nil {
-		return nil, errors.New("client connection is invalid")
-	}
-	return fn(connection.sftpClient)
-}
-
-func (m *BasicSFTPManager) Stat(p string) (fs.FileInfo, error) {
-	result, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
-		return client.Stat(p)
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	fileInfo, ok := result.(fs.FileInfo)
-	if !ok {
-		return nil, errors.New("invalid file info type")
-	}
-
-	return fileInfo, nil
-}
-
-func (m *BasicSFTPManager) Open(path string) (*sftp.File, error) {
-	result, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
-		return client.Open(path)
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	file, ok := result.(sftp.File)
-	if !ok {
-		return nil, errors.New("invalid file")
-	}
-	return &file, err
-}
-
-func (m *BasicSFTPManager) Rename(oldname, newname string) error {
-	_, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
-		return nil, client.Rename(oldname, newname)
-	})
-	return err
-}
-
-func (m *BasicSFTPManager) Create(path string) (*sftp.File, error) {
-	result, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
-		return client.Create(path)
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	file, ok := result.(sftp.File)
-	if !ok {
-		return nil, errors.New("invalid file")
-	}
-	return &file, err
-}
-
-func (m *BasicSFTPManager) ReadDir(p string) ([]fs.FileInfo, error) {
-	result, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
-		return client.ReadDir(p)
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	fileInfo, ok := result.([]fs.FileInfo)
-	if !ok {
-		return nil, errors.New("invalid file info type")
-	}
-	return fileInfo, err
-}
-
-func (m *BasicSFTPManager) MkdirAll(path string) error {
-	_, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
-		return nil, client.MkdirAll(path)
-	})
-	return err
-}
-
-func (m *BasicSFTPManager) Chown(path string) error {
-	_, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
-		return nil, client.Chown(path, 1000, 1000)
-	})
-	return err
-}
-
-func (m *BasicSFTPManager) OpenFile(path string, f int) (*sftp.File, error) {
-	result, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
-		return client.OpenFile(path, f)
-	})
-	file, ok := result.(sftp.File)
-	if !ok {
-		return nil, errors.New("invalid file")
-	}
-	return &file, err
-}
-
-func (m *BasicSFTPManager) Chmod(path string, mode fs.FileMode) error {
-	_, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
-		return nil, client.Chmod(path, mode)
-	})
-	return err
-}
-
-func (m *BasicSFTPManager) Remove(path string) error {
-	_, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
-		return nil, client.Remove(path)
-	})
-	return err
-}
-
-func (m *BasicSFTPManager) Mkdir(path string) error {
-	_, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
-		return nil, client.Mkdir(path)
-	})
-	return err
-}
-
-func (m *BasicSFTPManager) Lstat(p string) (fs.FileInfo, error) {
-	result, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
-		return client.Lstat(p)
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	fileInfo, ok := result.(fs.FileInfo)
-	if !ok {
-		return nil, errors.New("invalid file info type")
-	}
-
-	return fileInfo, nil
-}
-
-func (m *BasicSFTPManager) RemoveDirectory(path string) error {
-	_, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
-		return nil, client.RemoveDirectory(path)
-	})
-	return err
-}
-
-func (m *BasicSFTPManager) Join(elem ...string) (string, error) {
-	result, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
-		return client.Join(elem...), nil
-	})
-	if err != nil {
-		return "", err
-	}
-
-	joinResult, ok := result.(string)
-	if !ok {
-		return "", errors.New("invalid join result type")
-	}
-
-	return joinResult, err
-}
-
-func (m *BasicSFTPManager) Chtimes(path string, atime time.Time, mtime time.Time) error {
-	_, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
-		return nil, client.Chtimes(path, atime, mtime)
-	})
-	return err
 }

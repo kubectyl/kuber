@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/utils/pointer"
 
 	"github.com/kubectyl/kuber/config"
 	"github.com/kubectyl/kuber/environment"
@@ -334,10 +335,9 @@ func (e *Environment) Terminate(ctx context.Context) error {
 
 	// We set it to stopping than offline to prevent crash detection from being triggered.
 	e.SetState(environment.ProcessStoppingState)
-	var zero int64 = 0
 	policy := metav1.DeletePropagationForeground
 	if err := e.client.CoreV1().Pods(config.Get().Cluster.Namespace).Delete(ctx, e.Id, metav1.DeleteOptions{
-		GracePeriodSeconds: &zero,
+		GracePeriodSeconds: pointer.Int64(0),
 		PropagationPolicy:  &policy,
 	}); err != nil && !errors.IsNotFound(err) {
 		return errors2.WithStack(err)

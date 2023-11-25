@@ -11,6 +11,7 @@ import (
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
 	snapshotclientset "github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/pointer"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -61,7 +62,7 @@ func (b *LocalBackup) WithLogContext(c map[string]interface{}) {
 
 // Generate generates a backup of the selected files and pushes it to the
 // defined location for this instance.
-func (b *LocalBackup) Generate(ctx context.Context, sid, ignore string) (*ArchiveDetails, error) {
+func (b *LocalBackup) Generate(ctx context.Context, sid string) (*ArchiveDetails, error) {
 	b.log().Info("creating snapshot for server")
 
 	cfg := config.Get().Cluster
@@ -153,11 +154,10 @@ func (b *LocalBackup) Restore(ctx context.Context, sId string, disk int64, stora
 	}
 
 	if snapshot.Status != nil {
-		var seconds int64 = 30
 		policy := metav1.DeletePropagationForeground
 
 		err = b.clientset.CoreV1().Pods(cfg.Namespace).DeleteCollection(ctx, metav1.DeleteOptions{
-			GracePeriodSeconds: &seconds,
+			GracePeriodSeconds: pointer.Int64(30),
 			PropagationPolicy:  &policy,
 		}, metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("Service=Kubectyl,uuid=%s", sId),
@@ -184,7 +184,7 @@ func (b *LocalBackup) Restore(ctx context.Context, sId string, disk int64, stora
 		}
 
 		err = b.clientset.CoreV1().PersistentVolumeClaims(cfg.Namespace).Delete(ctx, pvc.Name, metav1.DeleteOptions{
-			GracePeriodSeconds: &seconds,
+			GracePeriodSeconds: pointer.Int64(30),
 			PropagationPolicy:  &policy,
 		})
 		if err != nil && !errors.IsNotFound(err) {

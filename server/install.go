@@ -150,12 +150,9 @@ func (s *Server) internalInstall() error {
 				s.fs.SetManager(fmt.Sprintf("%s:%v", ip, port))
 			}
 		}
-		s.Log().Info("booting server SFTP process for the first time after installation")
+		s.Log().Info("creating server SFTP pod after installation")
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		if err := s.Environment.CreateSFTP(ctx, cancel); err != nil {
+		if err := s.Environment.CreateSFTP(s.Context()); err != nil {
 			return
 		}
 	}()
@@ -335,31 +332,6 @@ func (ip *InstallationProcess) BeforeExecute() error {
 	if err := ip.RemoveContainer(); err != nil {
 		return errors2.WithMessage(err, "failed to remove existing install container for server")
 	}
-
-	if deleteFiles {
-		if err := ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Delete(context.Background(), ip.Server.ID()+"-pvc", metav1.DeleteOptions{}); err != nil {
-			if !errors.IsNotFound(err) {
-				return errors2.WithMessage(err, "failed to remove PVC before running installation")
-			}
-		}
-
-		if err := wait.PollUntilWithContext(ip.Server.Context(), time.Second, func(ctx context.Context) (bool, error) {
-			_, err := ip.client.CoreV1().PersistentVolumeClaims(config.Get().Cluster.Namespace).Get(ctx, fmt.Sprintf("%s-pvc", ip.Server.ID()), metav1.GetOptions{})
-			if err != nil && !errors.IsNotFound(err) {
-				return false, err
-			}
-
-			if errors.IsNotFound(err) {
-				return true, nil
-			}
-
-			return false, nil
-		}); err != nil {
-			return errors2.WithMessage(err, "failed while waiting for PVC to be deleted")
-		}
-	} else {
-		ip.Server.Log().Info("skipping PVC deletion, disabled by user")
-	}
 	return nil
 }
 
@@ -498,6 +470,8 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		return "", err
 	}
 
+	fsGroupChangePolicy := corev1.FSGroupChangeOnRootMismatch
+
 	pod := &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",
@@ -534,8 +508,10 @@ func (ip *InstallationProcess) Execute() (string, error) {
 				},
 			},
 			SecurityContext: &corev1.PodSecurityContext{
-				RunAsUser:    pointer.Int64(1000),
-				RunAsNonRoot: pointer.Bool(true),
+				FSGroup:             pointer.Int64(2000),
+				FSGroupChangePolicy: &fsGroupChangePolicy,
+				RunAsUser:           pointer.Int64(1000),
+				RunAsNonRoot:        pointer.Bool(true),
 			},
 			Containers: []corev1.Container{
 				{
@@ -559,6 +535,28 @@ func (ip *InstallationProcess) Execute() (string, error) {
 			},
 			RestartPolicy: corev1.RestartPolicy("Never"),
 		},
+	}
+
+	if deleteFiles {
+		newInitContainer := corev1.Container{
+			Name:            "delete-files",
+			Image:           "busybox",
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			SecurityContext: &corev1.SecurityContext{
+				RunAsUser:    pointer.Int64(1000),
+				RunAsNonRoot: pointer.Bool(true),
+			},
+			Command:   []string{"/bin/sh", "-c", "find /home/container -mindepth 1 -delete"},
+			Resources: corev1.ResourceRequirements{},
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      "storage",
+					MountPath: "/home/container",
+				},
+			},
+		}
+
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, newInitContainer)
 	}
 
 	if len(ip.Server.Config().NodeSelectors) > 0 {
@@ -631,8 +629,8 @@ func (ip *InstallationProcess) Execute() (string, error) {
 				switch {
 				case containerStatus.State.Running != nil:
 					return true, nil
-				case containerStatus.State.Waiting != nil && containerStatus.State.Waiting.Reason != "ContainerCreating":
-					return false, errors2.New(containerStatus.State.Waiting.Reason)
+				default:
+					return false, nil
 				}
 
 			}

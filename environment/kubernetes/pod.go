@@ -210,15 +210,6 @@ func (e *Environment) Create() error {
 		imagepullpolicy = corev1.PullIfNotPresent
 	}
 
-	getInt := func() int32 {
-		port := p.DefaultMapping.Port
-		if port == 0 {
-			port = a.DefaultMapping.Port
-		}
-		return int32(port)
-	}
-	port := getInt()
-
 	// Prevents high CPU usage of kubelet by preventing chown on the entire CSI
 	fsGroupChangePolicy := corev1.FSGroupChangeOnRootMismatch
 
@@ -284,6 +275,12 @@ func (e *Environment) Create() error {
 						},
 					},
 				},
+				{
+					Name: "logs",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
 			},
 			Containers: []corev1.Container{
 				{
@@ -293,16 +290,16 @@ func (e *Environment) Create() error {
 					TTY:             true,
 					Stdin:           true,
 					WorkingDir:      "/home/container",
-					Ports: []corev1.ContainerPort{
-						{
-							ContainerPort: port,
-							Protocol:      corev1.Protocol("TCP"),
-						},
-						{
-							ContainerPort: port,
-							Protocol:      corev1.Protocol("UDP"),
-						},
-					},
+					// Ports: []corev1.ContainerPort{
+					// 	{
+					// 		ContainerPort: int32(p.DefaultMapping.Port),
+					// 		Protocol:      corev1.Protocol("TCP"),
+					// 	},
+					// 	{
+					// 		ContainerPort: int32(p.DefaultMapping.Port),
+					// 		Protocol:      corev1.Protocol("UDP"),
+					// 	},
+					// },
 					Resources: corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
 							corev1.ResourceCPU:    *resource.NewMilliQuantity(10*resources.CpuLimit, resource.DecimalSI),
@@ -355,6 +352,10 @@ func (e *Environment) Create() error {
 							Name:      "secret",
 							ReadOnly:  true,
 							MountPath: path.Join(cfg.System.Data, ".sftp"),
+						},
+						{
+							Name:      "logs",
+							MountPath: cfg.System.LogDirectory,
 						},
 					},
 				},
@@ -494,7 +495,7 @@ func (e *Environment) Create() error {
 		bindings = a.Bindings()
 	}
 
-	for b := range bindings {
+	for b := range p.Bindings() {
 		port, err := strconv.ParseInt(b.Port(), 10, 32)
 		if err != nil {
 			return err
@@ -600,11 +601,10 @@ func (e *Environment) CreateService() error {
 			Selector: map[string]string{
 				"uuid": e.Id,
 			},
-			Type:                          corev1.ServiceType(serviceType),
-			ExternalTrafficPolicy:         corev1.ServiceExternalTrafficPolicyType(externalPolicy),
-			HealthCheckNodePort:           0,
-			PublishNotReadyAddresses:      true,
-			AllocateLoadBalancerNodePorts: new(bool),
+			Type:                     corev1.ServiceType(serviceType),
+			ExternalTrafficPolicy:    corev1.ServiceExternalTrafficPolicyType(externalPolicy),
+			HealthCheckNodePort:      0,
+			PublishNotReadyAddresses: true,
 		},
 	}
 
@@ -625,11 +625,10 @@ func (e *Environment) CreateService() error {
 			Selector: map[string]string{
 				"uuid": e.Id,
 			},
-			Type:                          corev1.ServiceType(serviceType),
-			ExternalTrafficPolicy:         corev1.ServiceExternalTrafficPolicyType(externalPolicy),
-			HealthCheckNodePort:           0,
-			PublishNotReadyAddresses:      true,
-			AllocateLoadBalancerNodePorts: new(bool),
+			Type:                     corev1.ServiceType(serviceType),
+			ExternalTrafficPolicy:    corev1.ServiceExternalTrafficPolicyType(externalPolicy),
+			HealthCheckNodePort:      0,
+			PublishNotReadyAddresses: true,
 		},
 	}
 
@@ -677,6 +676,7 @@ func (e *Environment) CreateService() error {
 
 		if serviceType == "LoadBalancer" {
 			service.Spec.Ports[len(service.Spec.Ports)-1].NodePort = 0
+			service.Spec.AllocateLoadBalancerNodePorts = new(bool)
 			*service.Spec.AllocateLoadBalancerNodePorts = false
 			service.Spec.LoadBalancerIP = a.DefaultMapping.Ip
 		}
@@ -725,7 +725,7 @@ func (e *Environment) CreateService() error {
 	return nil
 }
 
-func (e *Environment) CreateSFTP(ctx context.Context, cancelFunc context.CancelFunc) error {
+func (e *Environment) CreateSFTP(ctx context.Context) error {
 	cfg := config.Get()
 
 	fsGroupChangePolicy := corev1.FSGroupChangeOnRootMismatch
@@ -877,7 +877,7 @@ func (e *Environment) CreateSFTP(ctx context.Context, cancelFunc context.CancelF
 					return err
 				}
 
-				return e.CreateSFTP(ctx, cancelFunc)
+				return e.CreateSFTP(ctx)
 			}
 		} else {
 			e.log().WithField("error", err).Warn("environment/kubernetes: failed to create SFTP pod")
