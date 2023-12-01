@@ -525,6 +525,7 @@ func (ip *InstallationProcess) Execute() (string, error) {
 						{
 							Name:      "configmap",
 							MountPath: "/mnt/install",
+							ReadOnly:  *pointer.Bool(true),
 						},
 						{
 							Name:      "storage",
@@ -606,7 +607,7 @@ func (ip *InstallationProcess) Execute() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ip.Server.Log().WithField("pod_id", r.UID).Info("running installation script for server in container")
+	ip.Server.Log().WithField("pod_id", pod.Name).Info("running installation script for server in container")
 
 	// Process the install event in the background by listening to the stream output until the
 	// container has stopped, at which point we'll disconnect from it.
@@ -622,17 +623,27 @@ func (ip *InstallationProcess) Execute() (string, error) {
 				return false, err
 			}
 
-			for _, containerStatus := range pod.Status.ContainerStatuses {
-				if containerStatus.Name != "installer" {
-					continue
+			if pod != nil && pod.Status.Phase == corev1.PodPending {
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == corev1.PodInitialized && condition.Status == corev1.ConditionFalse {
+						return false, nil
+					}
 				}
-				switch {
-				case containerStatus.State.Running != nil:
-					return true, nil
-				default:
-					return false, nil
-				}
+			}
 
+			if pod != nil && pod.Status.Phase == corev1.PodRunning {
+				for _, containerStatus := range pod.Status.ContainerStatuses {
+					if containerStatus.Name != "installer" {
+						continue
+					}
+					switch {
+					case containerStatus.State.Running != nil:
+						return true, nil
+					case containerStatus.State.Waiting != nil && containerStatus.State.Waiting.Reason != "ContainerCreating":
+						return false, errors2.New(containerStatus.State.Waiting.Reason)
+					}
+
+				}
 			}
 			return false, nil
 		})

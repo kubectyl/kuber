@@ -495,7 +495,7 @@ func (e *Environment) Create() error {
 		bindings = a.Bindings()
 	}
 
-	for b := range p.Bindings() {
+	for b := range bindings {
 		port, err := strconv.ParseInt(b.Port(), 10, 32)
 		if err != nil {
 			return err

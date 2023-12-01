@@ -179,7 +179,7 @@ func (s *Server) HandlePowerAction(action PowerAction, waitSeconds ...int) error
 		}
 
 		if action == PowerActionStop {
-			return nil
+			return s.Environment.CreateSFTP(s.Context())
 		}
 
 		// Now actually try to start the process by executing the normal pre-boot logic.
