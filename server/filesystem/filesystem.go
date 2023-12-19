@@ -543,7 +543,8 @@ func (fs *Filesystem) ListDirectory(p string) ([]Stat, error) {
 				if cleanedp != "" && f.Mode()&os.ModeNamedPipe == 0 {
 					file, err := fs.manager.Open(filepath.Join(cleaned, f.Name()))
 					if err != nil {
-						panic(fmt.Errorf("Error SFTP Open: %s", err))
+						// panic(fmt.Errorf("Error SFTP Open: %s", err))
+						fmt.Println(err)
 					}
 					m, _ = mimetype.DetectReader(file)
 				} else {
