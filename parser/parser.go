@@ -1,8 +1,6 @@
 package parser
 
 import (
-	"fmt"
-
 	"emperror.dev/errors"
 	"github.com/apex/log"
 	"github.com/buger/jsonparser"
@@ -162,56 +160,21 @@ func (cfr *ConfigurationFileReplacement) UnmarshalJSON(data []byte) error {
 // in the API response from the Panel.
 func (f *ConfigurationFile) Parse(configDir, externalDir string) ([]string, error) {
 	log.WithField("path", externalDir).WithField("parser", f.Parser.String()).Debug("parsing server configuration file")
-
 	if mb, err := json.Marshal(config.Get()); err != nil {
 		return []string{}, err
 	} else {
 		f.configuration = mb
 	}
 
-	switch f.Parser {
-	case Properties:
-		return []string{
-			"/bin/sh",
-			"-c",
-			fmt.Sprintf(`
-			configDir="%s"
-			externalDir="%s"
-			
-			for configFilePath in $configDir*; do
-				filename=$(basename "$configFilePath")
-				externalFilePath="${externalDir}${filename}"
-	
-				if [ -f "$externalFilePath" ]; then					
-					echo "Processing config file: $filename"
-					
-					while IFS='=' read -r key value; do
-						if [[ -n $key && $key != "#"* ]]; then
-							echo "Replacing $key with value $value in $externalFilePath"
-							if grep -qE "^$key=|^$key\s*=" "$externalFilePath"; then
-								sed -i "s|^$key=.*|$key=$value|g" "$externalFilePath"
-							else
-								echo "Invalid format in $externalFilePath"
-							fi
-						fi
-					done < "$configFilePath"
-				else
-					echo "File $externalFilePath not found"
-				fi
-			done
-			`, configDir, externalDir),
-		}, nil
-	case File:
-		return []string{}, nil
-	case Yaml, "yml":
-		return []string{}, nil
-	case Json:
-		return []string{}, nil
-	case Ini:
-		return []string{}, nil
-	case Xml:
-		return []string{}, nil
-	}
-
 	return []string{}, nil
+}
+
+type FileReplaceOperations struct {
+	Files []FileReplaceOperation `json:"files"`
+}
+
+type FileReplaceOperation struct {
+	TargetFile string `json:"target_file"`
+	SourceFile string `json:"source_file"`
+	TargetType string `json:"target_type"`
 }

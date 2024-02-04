@@ -3,6 +3,8 @@ package kubernetes
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -23,6 +25,7 @@ import (
 
 	"github.com/kubectyl/kuber/config"
 	"github.com/kubectyl/kuber/environment"
+	"github.com/kubectyl/kuber/parser"
 	"github.com/kubectyl/kuber/system"
 
 	corev1 "k8s.io/api/core/v1"
@@ -409,44 +412,87 @@ func (e *Environment) Create() error {
 		// Create a map to store the file data for the ConfigMap
 		fileData := make(map[string]string)
 
+		fileReplaceOps := parser.FileReplaceOperations{}
+
 		for _, k := range cfs {
-			// replacement := make(map[string]string)
+			fileName := base64.URLEncoding.EncodeToString([]byte(k.FileName))
+			fileName = strings.TrimRight(fileName, "=")
 			for _, t := range k.Replace {
-				// replacement[t.Match] = t.ReplaceWith.String()
-				fileData[k.FileName] += fmt.Sprintf("%s=%s\n", t.Match, t.ReplaceWith.String())
+				fileData[fileName] += fmt.Sprintf("%s=%s\n", t.Match, t.ReplaceWith.String())
 			}
-
-			command, err := k.Parse("/config/", "/home/container/")
-			if err != nil {
-				return err
+			fileOp := parser.FileReplaceOperation{
+				SourceFile: "/config/" + fileName,
+				TargetFile: "/home/container/" + k.FileName,
+				TargetType: k.Parser.String(),
 			}
-
-			// Add a new initContainer to the Pod
-			newInitContainer := corev1.Container{
-				Name:            "configuration-files",
-				Image:           "busybox",
-				ImagePullPolicy: corev1.PullIfNotPresent,
-				SecurityContext: &corev1.SecurityContext{
-					RunAsUser:    pointer.Int64(1000),
-					RunAsNonRoot: pointer.Bool(true),
-				},
-				Command:   command,
-				Resources: corev1.ResourceRequirements{},
-				VolumeMounts: []corev1.VolumeMount{
-					{
-						Name:      "replacement",
-						MountPath: "/config",
-						ReadOnly:  true,
-					},
-					{
-						Name:      "storage",
-						MountPath: "/home/container",
-					},
-				},
-			}
-
-			pod.Spec.InitContainers = append(pod.Spec.InitContainers, newInitContainer)
+			fileReplaceOps.Files = append(fileReplaceOps.Files, fileOp)
 		}
+		binaryFileOpData, err := json.Marshal(fileReplaceOps)
+		binData := make(map[string][]byte)
+		binData["config.json"] = binaryFileOpData
+		newConfigMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      e.Id + "-config-replace-ops",
+				Namespace: cfg.Cluster.Namespace,
+				Labels: map[string]string{
+					"Service": "Kubectyl",
+					"uuid":    e.Id,
+				},
+			},
+			BinaryData: binData,
+		}
+
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: "file-replace-ops",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: newConfigMap.Name,
+					},
+				},
+			},
+		})
+
+		err = e.CreateOrUpdateConfigMap(newConfigMap)
+		if err != nil {
+			return err
+		}
+
+		// Add a new initContainer to the Pod
+		newInitContainer := corev1.Container{
+			Name:            "configuration-files",
+			Image:           "inglemr/fileparser:latest",
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			SecurityContext: &corev1.SecurityContext{
+				RunAsUser:    pointer.Int64(1000),
+				RunAsNonRoot: pointer.Bool(true),
+			},
+			Env: []corev1.EnvVar{
+				{
+					Name:  "CONFIG_LOCATION",
+					Value: "/fileparserconfig/config.json",
+				},
+			},
+			Resources: corev1.ResourceRequirements{},
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      "replacement",
+					MountPath: "/config",
+					ReadOnly:  true,
+				},
+				{
+					Name:      "storage",
+					MountPath: "/home/container",
+				},
+				{
+					Name:      "file-replace-ops",
+					MountPath: "/fileparserconfig",
+					ReadOnly:  true,
+				},
+			},
+		}
+
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, newInitContainer)
 
 		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
 			Name: "replacement",
@@ -464,28 +510,17 @@ func (e *Environment) Create() error {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      e.Id + "-replacement",
 				Namespace: cfg.Cluster.Namespace,
+				Labels: map[string]string{
+					"Service": "Kubectyl",
+					"uuid":    e.Id,
+				},
 			},
 			Data: fileData,
 		}
 
-		// Check if the ConfigMap already exists
-		_, err := e.client.CoreV1().ConfigMaps(cfg.Cluster.Namespace).Get(context.TODO(), e.Id+"-replacement", metav1.GetOptions{})
+		err = e.CreateOrUpdateConfigMap(configMap)
 		if err != nil {
-			if errors.IsNotFound(err) {
-				_, err = e.client.CoreV1().ConfigMaps(cfg.Cluster.Namespace).Create(context.TODO(), configMap, metav1.CreateOptions{})
-				if err != nil {
-					return err
-				}
-				e.log().Info("replacement configmap created successfully")
-			} else {
-				return err
-			}
-		} else {
-			_, err = e.client.CoreV1().ConfigMaps(cfg.Cluster.Namespace).Update(context.TODO(), configMap, metav1.UpdateOptions{})
-			if err != nil {
-				return err
-			}
-			e.log().Info("replacement configmap updated successfully")
+			return err
 		}
 	}
 
@@ -601,14 +636,12 @@ func (e *Environment) CreateService() error {
 			Selector: map[string]string{
 				"uuid": e.Id,
 			},
-			Type:                          corev1.ServiceType(serviceType),
-			ExternalTrafficPolicy:         corev1.ServiceExternalTrafficPolicyType(externalPolicy),
-			HealthCheckNodePort:           0,
-			PublishNotReadyAddresses:      true,
-			AllocateLoadBalancerNodePorts: new(bool),
+			Type:                     corev1.ServiceType(serviceType),
+			ExternalTrafficPolicy:    corev1.ServiceExternalTrafficPolicyType(externalPolicy),
+			HealthCheckNodePort:      0,
+			PublishNotReadyAddresses: true,
 		},
 	}
-
 	udp := &corev1.Service{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Service",
@@ -626,15 +659,16 @@ func (e *Environment) CreateService() error {
 			Selector: map[string]string{
 				"uuid": e.Id,
 			},
-			Type:                          corev1.ServiceType(serviceType),
-			ExternalTrafficPolicy:         corev1.ServiceExternalTrafficPolicyType(externalPolicy),
-			HealthCheckNodePort:           0,
-			PublishNotReadyAddresses:      true,
-			AllocateLoadBalancerNodePorts: new(bool),
+			Type:                     corev1.ServiceType(serviceType),
+			ExternalTrafficPolicy:    corev1.ServiceExternalTrafficPolicyType(externalPolicy),
+			HealthCheckNodePort:      0,
+			PublishNotReadyAddresses: true,
 		},
 	}
 
 	if serviceType == "LoadBalancer" && cfg.Cluster.MetalLBSharedIP {
+		udp.Spec.AllocateLoadBalancerNodePorts = new(bool)
+		tcp.Spec.AllocateLoadBalancerNodePorts = new(bool)
 		tcp.Annotations = map[string]string{
 			"metallb.universe.tf/allow-shared-ip": e.Id,
 		}
@@ -1061,4 +1095,28 @@ func (e *Environment) convertMounts() ([]corev1.VolumeMount, []corev1.Volume) {
 	}
 
 	return out, volumes
+}
+
+func (e *Environment) CreateOrUpdateConfigMap(configMap *corev1.ConfigMap) error {
+	// Check if the ConfigMap already exists
+	cfg := config.Get()
+	_, err := e.client.CoreV1().ConfigMaps(cfg.Cluster.Namespace).Get(context.TODO(), configMap.Name, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			_, err = e.client.CoreV1().ConfigMaps(cfg.Cluster.Namespace).Create(context.TODO(), configMap, metav1.CreateOptions{})
+			if err != nil {
+				return err
+			}
+			e.log().Info(configMap.Name + " configmap created successfully")
+		} else {
+			return err
+		}
+	} else {
+		_, err = e.client.CoreV1().ConfigMaps(cfg.Cluster.Namespace).Update(context.TODO(), configMap, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+		e.log().Info(configMap.Name + " configmap updated successfully")
+	}
+	return nil
 }

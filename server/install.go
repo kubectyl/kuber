@@ -145,6 +145,7 @@ func (s *Server) internalInstall() error {
 					if len(svc.Spec.Ports) > 0 {
 						port = int(svc.Spec.Ports[0].NodePort)
 					}
+					port = config.Get().System.Sftp.Port
 				}
 
 				s.fs.SetManager(fmt.Sprintf("%s:%v", ip, port))
@@ -498,6 +499,7 @@ func (ip *InstallationProcess) Execute() (string, error) {
 		return "", err
 	}
 
+	fsGroupChangePolicy := corev1.FSGroupChangeOnRootMismatch
 	pod := &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",
@@ -534,8 +536,10 @@ func (ip *InstallationProcess) Execute() (string, error) {
 				},
 			},
 			SecurityContext: &corev1.PodSecurityContext{
-				RunAsUser:    pointer.Int64(1000),
-				RunAsNonRoot: pointer.Bool(true),
+				RunAsUser:           pointer.Int64(1000),
+				RunAsNonRoot:        pointer.Bool(true),
+				FSGroup:             pointer.Int64(2000),
+				FSGroupChangePolicy: &fsGroupChangePolicy,
 			},
 			Containers: []corev1.Container{
 				{

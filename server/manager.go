@@ -236,21 +236,6 @@ func (m *Manager) InitServer(data remote.ServerConfigurationResponse) (*Server, 
 
 			ip := svc.Spec.ClusterIP
 			port := config.Get().System.Sftp.Port
-
-			switch svc.Spec.Type {
-			case "LoadBalancer":
-				if len(svc.Status.LoadBalancer.Ingress) > 0 {
-					ip = svc.Status.LoadBalancer.Ingress[0].IP
-					if len(svc.Spec.Ports) > 0 {
-						port = int(svc.Spec.Ports[0].Port)
-					}
-				}
-			case "NodePort":
-				if len(svc.Spec.Ports) > 0 {
-					port = int(svc.Spec.Ports[0].NodePort)
-				}
-			}
-
 			s.fs.SetManager(fmt.Sprintf("%s:%v", ip, port))
 		}
 	}
