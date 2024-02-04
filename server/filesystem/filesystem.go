@@ -130,29 +130,33 @@ func (fs *Filesystem) Touch(p string, flag int) (*sftp.File, error) {
 	if err == nil {
 		return f, nil
 	}
-	// If the error is not because it doesn't exist then we just need to bail at this point.
+
+	// If the error is not because the file doesn't exist, return the error.
 	if !errors.Is(err, os.ErrNotExist) {
 		return nil, errors.Wrap(err, "server/filesystem: touch: failed to open file handle")
 	}
-	// Only create and chown the directory if it doesn't exist.
-	if _, err := fs.manager.Stat(filepath.Dir(cleaned)); errors.Is(err, os.ErrNotExist) {
-		// Create the path leading up to the file we're trying to create, setting the final perms
-		// on it as we go.
-		if err := fs.manager.MkdirAll(filepath.Dir(cleaned)); err != nil {
+
+	// At this point, the error is because the file does not exist.
+	// Ensure the directory exists and has the correct ownership.
+	dirPath := filepath.Dir(cleaned)
+	if _, err := fs.manager.Stat(dirPath); errors.Is(err, os.ErrNotExist) {
+		if err := fs.manager.MkdirAll(dirPath); err != nil {
 			return nil, errors.Wrap(err, "server/filesystem: touch: failed to create directory tree")
 		}
-		if err := fs.Chown(filepath.Dir(cleaned)); err != nil {
+		if err := fs.Chown(dirPath); err != nil {
 			return nil, err
 		}
 	}
-	// o := &fileOpener{}
-	// Try to open the file now that we have created the pathing necessary for it, and then
-	// Chown that file so that the permissions don't mess with things.
-	// f, err = o.open(cleaned, flag, 0o644)
-	// if err != nil {
-	// 	return nil, errors.Wrap(err, "server/filesystem: touch: failed to open file with wait")
-	// }
-	_ = fs.Chown(cleaned)
+
+	// Attempt to create the file since it does not exist.
+	f, err = fs.manager.OpenFile(cleaned, flag|os.O_CREATE)
+	if err != nil {
+		return nil, errors.Wrap(err, "server/filesystem: touch: failed to create file")
+	}
+
+	// Ensure the newly created file has the correct ownership.
+	_ = fs.Chown(cleaned) // Consider handling this error.
+
 	return f, nil
 }
 
@@ -165,43 +169,37 @@ func (fs *Filesystem) Writefile(p string, r io.Reader) error {
 		return err
 	}
 
-	var currentSize int64
-	// If the file does not exist on the system already go ahead and create the pathway
-	// to it and an empty file. We'll then write to it later on after this completes.
+	// Check if the file exists and is not a directory; no need to stat if we're going to overwrite.
 	stat, err := fs.manager.Stat(cleaned)
-	if err != nil && !os.IsNotExist(err) {
+	if err == nil && stat.IsDir() {
+		return errors.WithStack(&Error{code: ErrCodeIsDirectory, resolved: cleaned})
+	} else if err != nil && !os.IsNotExist(err) {
 		return errors.Wrap(err, "server/filesystem: writefile: failed to stat file")
-	} else if err == nil {
-		if stat.IsDir() {
-			return errors.WithStack(&Error{code: ErrCodeIsDirectory, resolved: cleaned})
-		}
-		currentSize = stat.Size()
 	}
 
-	// br := bufio.NewReader(r)
-	// Check that the new size we're writing to the disk can fit. If there is currently
-	// a file we'll subtract that current file size from the size of the buffer to determine
-	// the amount of new data we're writing (or amount we're removing if smaller).
-	// if err := fs.HasSpaceFor(int64(br.Size()) - currentSize); err != nil {
-	// 	return err
-	// }
-
-	// Touch the file and return the handle to it at this point. This will create the file,
-	// any necessary directories, and set the proper owner of the file.
+	// Touch the file to ensure it exists, directories are created, and it's ready for writing.
+	// This handles creating the file and truncating if it already exists.
 	file, err := fs.Touch(cleaned, os.O_RDWR|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	buf := make([]byte, 1024*4)
-	sz, err := io.CopyBuffer(file, r, buf)
+	// Perform the write operation.
+	written, err := io.Copy(file, r) // io.Copy uses a 32KB buffer under the hood.
+	if err != nil {
+		return errors.Wrap(err, "server/filesystem: writefile: failed to write to file")
+	}
 
-	// Adjust the disk usage to account for the old size and the new size of the file.
-	fs.addDisk(sz - currentSize)
+	// Adjust the disk usage considering the new size.
+	if stat != nil { // If the file previously existed, adjust disk usage based on the difference.
+		fs.addDisk(written - stat.Size())
+	} else {
+		fs.addDisk(written) // For a new file, just add the total written size.
+	}
 
+	// Set the proper ownership of the file after writing.
 	return fs.Chown(cleaned)
-	// return nil
 }
 
 // Creates a new directory (name) at a specified path (p) for the server.
@@ -543,7 +541,8 @@ func (fs *Filesystem) ListDirectory(p string) ([]Stat, error) {
 				if cleanedp != "" && f.Mode()&os.ModeNamedPipe == 0 {
 					file, err := fs.manager.Open(filepath.Join(cleaned, f.Name()))
 					if err != nil {
-						panic(fmt.Errorf("Error SFTP Open: %s", err))
+						// panic(fmt.Errorf("Error SFTP Open: %s", err))
+						fmt.Println(err)
 					}
 					m, _ = mimetype.DetectReader(file)
 				} else {
