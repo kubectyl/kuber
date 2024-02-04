@@ -196,12 +196,11 @@ func (m *BasicSFTPManager) Open(path string) (*sftp.File, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	file, ok := result.(sftp.File)
+	file, ok := result.(*sftp.File)
 	if !ok {
 		return nil, errors.New("invalid file")
 	}
-	return &file, err
+	return file, nil
 }
 
 func (m *BasicSFTPManager) Rename(oldname, newname string) error {
@@ -219,11 +218,11 @@ func (m *BasicSFTPManager) Create(path string) (*sftp.File, error) {
 		return nil, err
 	}
 
-	file, ok := result.(sftp.File)
+	file, ok := result.(*sftp.File)
 	if !ok {
 		return nil, errors.New("invalid file")
 	}
-	return &file, err
+	return file, err
 }
 
 func (m *BasicSFTPManager) ReadDir(p string) ([]fs.FileInfo, error) {
@@ -259,11 +258,12 @@ func (m *BasicSFTPManager) OpenFile(path string, f int) (*sftp.File, error) {
 	result, err := m.withConnectionCheck(func(client *sftp.Client) (interface{}, error) {
 		return client.OpenFile(path, f)
 	})
-	file, ok := result.(sftp.File)
+
+	file, ok := result.(*sftp.File)
 	if !ok {
 		return nil, errors.New("invalid file")
 	}
-	return &file, err
+	return file, err
 }
 
 func (m *BasicSFTPManager) Chmod(path string, mode fs.FileMode) error {

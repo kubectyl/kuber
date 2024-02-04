@@ -546,47 +546,56 @@ func (fs *Filesystem) extractBZIP2Archive(remoteFilePath string, destinationDir 
 func (fs *Filesystem) extractZIPArchive(remoteFilePath string, destinationDir string) error {
 	remoteFile, err := fs.manager.Open(remoteFilePath)
 	if err != nil {
-		return fmt.Errorf("failed to open remote file: %v", err)
+		return fmt.Errorf("failed to open remote file: %w", err)
 	}
 	defer remoteFile.Close()
 
-	remoteFileInfo, err := fs.manager.Stat(remoteFilePath)
+	// Use the zip package to read the archive directly from the remote file.
+	// The zip.NewReader function requires the size, which we can obtain from the file's stat.
+	stat, err := remoteFile.Stat()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to stat remote file: %w", err)
 	}
 
-	zipReader, err := zip.NewReader(remoteFile, remoteFileInfo.Size())
+	zipReader, err := zip.NewReader(remoteFile, stat.Size())
 	if err != nil {
-		return fmt.Errorf("failed to create zip reader: %v", err)
+		return fmt.Errorf("failed to create zip reader: %w", err)
 	}
 
 	for _, file := range zipReader.File {
-		destFilePath := filepath.Join(destinationDir, file.Name)
-
-		if file.FileInfo().IsDir() {
-			err := fs.manager.MkdirAll(destFilePath)
-			if err != nil {
-				return fmt.Errorf("failed to create directory: %v", err)
-			}
-			continue
+		if err := fs.extractFileFromZip(file, destinationDir); err != nil {
+			return err // Error already formatted.
 		}
+	}
 
-		destFile, err := fs.manager.Create(destFilePath)
-		if err != nil {
-			return fmt.Errorf("failed to create file: %v", err)
-		}
-		defer destFile.Close()
+	return nil
+}
 
-		srcFile, err := fs.manager.Open(file.Name)
-		if err != nil {
-			return fmt.Errorf("failed to open file inside ZIP: %v", err)
-		}
-		defer srcFile.Close()
+// Helper function to extract a single file from the zip archive.
+func (fs *Filesystem) extractFileFromZip(file *zip.File, destinationDir string) error {
+	destFilePath := filepath.Join(destinationDir, file.Name)
 
-		_, err = io.Copy(destFile, srcFile)
-		if err != nil {
-			return fmt.Errorf("failed to extract file from ZIP: %v", err)
+	if file.FileInfo().IsDir() {
+		if err := fs.manager.MkdirAll(destFilePath); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", destFilePath, err)
 		}
+		return nil
+	}
+
+	destFile, err := fs.manager.Create(destFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to create file %s: %w", destFilePath, err)
+	}
+	defer destFile.Close()
+
+	srcFile, err := file.Open()
+	if err != nil {
+		return fmt.Errorf("failed to open file inside ZIP: %w", err)
+	}
+	defer srcFile.Close()
+
+	if _, err = io.Copy(destFile, srcFile); err != nil {
+		return fmt.Errorf("failed to extract file %s from ZIP: %w", file.Name, err)
 	}
 
 	return nil

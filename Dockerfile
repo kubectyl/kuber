@@ -7,7 +7,7 @@ WORKDIR /app/
 COPY go.mod go.sum /app/
 RUN go mod download
 COPY . /app/
-RUN CGO_ENABLED=0 go build \
+RUN --mount=type=cache,target="/root/.cache/go-build" CGO_ENABLED=0 go build \
     -ldflags="-s -w -X github.com/kubectyl/kuber/system.Version=$VERSION" \
     -v \
     -trimpath \
