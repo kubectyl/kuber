@@ -1,0 +1,15 @@
+name: Renovate
+on:
+  schedule:
+    - cron: '0/15 * * * *'
+jobs:
+  renovate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.1.1
+      - name: Self-hosted Renovate
+        uses: renovatebot/github-action@v40.1.7
+        with:
+          configurationFile: example/renovate-config.js
+          token: ${{ secrets.RENOVATE_TOKEN }}
